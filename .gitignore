@@ -1,0 +1,4 @@
+node_modules/*
+hls/*
+
+git config --global user.email "you@example.com"
