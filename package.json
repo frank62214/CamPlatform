@@ -15,8 +15,10 @@
     "server": "node server.js"
   },
   "dependencies": {
+    "dayjs": "^1.11.18",
     "express": "^5.1.0",
     "hls.js": "^1.6.11",
+    "node-cron": "^4.2.1",
     "vue": "^3.5.18"
   },
   "devDependencies": {
