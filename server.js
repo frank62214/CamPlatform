@@ -17,7 +17,7 @@ if (!fs.existsSync(RECORD_FOLDER)) {
 
 // 讀取命令列參數
 // 錄製時間間隔 (分鐘) - 測試時改成 10，正式可以 1440 (一天)
-const RECORD_INTERVAL_MINUTES = 10;
+const RECORD_INTERVAL_MINUTES = 1440;
 const RTSP_URL = "rtsp://admin:admin@" + process.argv[2] + ":554/live/ch0";
 const PORT = process.argv[3]==null? 3000 : process.argv[3] ;
 if (!RTSP_URL) {
@@ -28,10 +28,11 @@ const HLS_FOLDER = path.resolve(`./hls/${PORT}`);
 
 // 執行錄製
 // 建立 cron 表達式 (每 X 分鐘執行一次)
-const cronExp = `*/${RECORD_INTERVAL_MINUTES} * * * *`;
+// const cronExp = `*/${RECORD_INTERVAL_MINUTES} * * * *`;
+const cronExp = `"0 0 * * *"`;
 cron.schedule(cronExp, () => {
 //   const date = new Date().toISOString().replace(/:/g, "-").split(".")[0];
-  const date  =  dayjs().format('YYYY-MM-DD HH:mm:ss');
+  const date  =  dayjs().format('YYYY-MM-DD');
   const filename = `record_${date}.mp4`;
   const filepath = path.join(RECORD_FOLDER, filename);
 
