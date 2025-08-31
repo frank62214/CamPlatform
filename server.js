@@ -9,30 +9,31 @@ import dayjs from "dayjs";
 const app = express();
 // const PORT = 3000;
 // const RTSP_URL = "rtsp://admin:admin@192.168.18.11:554/live/ch0";
-
-const RECORD_FOLDER = path.join(process.cwd(), "records");
+const PORT = process.argv[3]==null? 3000 : process.argv[3];
+const RECORD_FOLDER = path.join(process.cwd(), `records/${PORT}/`);
 if (!fs.existsSync(RECORD_FOLDER)) {
-  fs.mkdirSync(RECORD_FOLDER);
+  fs.mkdirSync(RECORD_FOLDER, { recursive: true });
 }
 
 // 讀取命令列參數
 // 錄製時間間隔 (分鐘) - 測試時改成 10，正式可以 1440 (一天)
-const RECORD_INTERVAL_MINUTES = 1440;
+const RECORD_INTERVAL_MINUTES = 1;
 const RTSP_URL = "rtsp://admin:admin@" + process.argv[2] + ":554/live/ch0";
-const PORT = process.argv[3]==null? 3000 : process.argv[3] ;
+
 if (!RTSP_URL) {
   console.error("❌ Please provide RTSP URL as argument");
   process.exit(1);
 }
 const HLS_FOLDER = path.resolve(`./hls/${PORT}`);
+const cameraName = PORT==3000? "客廳" : "大門";
 
 // 執行錄製
 // 建立 cron 表達式 (每 X 分鐘執行一次)
-// const cronExp = `*/${RECORD_INTERVAL_MINUTES} * * * *`;
-const cronExp = `"0 0 * * *"`;
+const cronExp = `*/${RECORD_INTERVAL_MINUTES} * * * *`;
+// const cronExp = `0 0 * * *`;
 cron.schedule(cronExp, () => {
 //   const date = new Date().toISOString().replace(/:/g, "-").split(".")[0];
-  const date  =  dayjs().format('YYYY-MM-DD');
+  const date  =  dayjs().format('YYYYY-MM-DD_HH:mm:ss');
   const filename = `record_${date}.mp4`;
   const filepath = path.join(RECORD_FOLDER, filename);
 
@@ -90,7 +91,13 @@ app.get("/", (req, res) => {
 // API: 列出所有錄影檔案
 app.get("/api/records", (req, res) => {
   const files = fs.readdirSync(RECORD_FOLDER).filter(f => f.endsWith(".mp4"));
-  res.json(files);
+  // 組成符合 HistoryRecord[] 的資料
+  const records = files.map((fileName, index) => ({
+    id: index.toString(), // 或者用 uuid
+    fileUrl: fileName
+  }));
+
+  res.json(records);
 });
 
 // API: 提供檔案播放
