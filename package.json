@@ -12,7 +12,8 @@
     "preview": "vite preview",
     "build-only": "vite build",
     "type-check": "vue-tsc --build",
-    "server": "node server.js"
+    "server": "node server.js",
+    "stream": "node stream.js"
   },
   "dependencies": {
     "dayjs": "^1.11.18",

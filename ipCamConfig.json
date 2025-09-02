@@ -1,0 +1,14 @@
+[
+    {        
+        "ip": "192.168.18.11",
+        "title": "客廳",
+        "serverPort": "3001",
+        "folderName": "cam1"
+    },
+    {
+        "ip": "192.168.18.12",
+        "title": "車庫",
+        "serverPort": "3002",
+        "folderName": "cam2"
+    }
+]
