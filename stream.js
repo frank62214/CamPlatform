@@ -12,7 +12,7 @@ const camNum = process.argv[2];
 
 // 讀取 JSON
 const rawData = fs.readFileSync('ipCamConfig.json', 'utf-8');
-const data = JSON.parse(rawData)[camNum]; // 轉成 JS 物件
+const data = camNum==null ? 3000 : JSON.parse(rawData)[camNum]; // 轉成 JS 物件
 
 // 設定參數
 const PORT = data.serverPort;
@@ -21,39 +21,18 @@ const cameraTitle = data.title;
 const baseFolderName = data.folderName;
 
 // 建立歷史紀錄與串流的資料夾
-const RECORD_FOLDER = path.join(process.cwd(), `/${baseFolderName}/records/`);
 const HLS_FOLDER = path.join(process.cwd(), `/${baseFolderName}/hls/`);
-if (!fs.existsSync(RECORD_FOLDER)) {
-  fs.mkdirSync(RECORD_FOLDER, { recursive: true });
-}
 if (!fs.existsSync(HLS_FOLDER)) {
   fs.mkdirSync(HLS_FOLDER, { recursive: true });
 }
 
 // 讀取錄影命令列參數
 // 錄製時間間隔 (分鐘) - 測試時改成 10，正式可以 1440 (一天)
-const RECORD_INTERVAL_MINUTES = 60;
 const RTSP_URL = "rtsp://admin:admin@" + IP + ":554/live/ch0";
 if (!RTSP_URL) {
   console.error("❌ Please provide RTSP URL as argument");
   process.exit(1);
 }
-// 執行錄製
-// 建立 cron 表達式 (每 X 分鐘執行一次)
-const cronExp = `*/${RECORD_INTERVAL_MINUTES} * * * *`;
-cron.schedule(cronExp, () => {
-  const date  =  dayjs().format('YYYY-MM-DD_HH:mm:ss');
-  const filename = `${baseFolderName}_${date}.mp4`;
-  const filepath = path.join(RECORD_FOLDER, filename);
-
-  const cmd = `ffmpeg -i ${RTSP_URL} -t ${RECORD_INTERVAL_MINUTES * 60} -c:v copy -c:a aac -movflags +faststart -y ${filepath}`;
-  console.log("開始錄製:", filename);
-
-  exec(cmd, (err) => {
-    if (err) console.error("FFmpeg 錄製失敗:", err);
-    else console.log("錄製完成:", filename);
-  });
-});
 
 // 提供 HLS 靜態檔案
 app.use("/hls", (req, res, next) => {
@@ -65,24 +44,37 @@ app.use("/hls", (req, res, next) => {
 
 // 啟動 ffmpeg 產生 HLS
 const ffmpeg = spawn("ffmpeg", [
-  "-i", RTSP_URL,
-  "-c:v", "libx264",
-  "-preset", "veryfast",
-  "-g", "50",
-  "-sc_threshold", "0",
-  "-f", "hls",
-  "-hls_time", "2",
-  "-hls_list_size", "3",
-  "-hls_flags", "delete_segments+omit_endlist",
-  path.join(HLS_FOLDER, "stream.m3u8")
+  "-rtsp_transport", "tcp",              // 用 TCP 取流，避免 UDP 丟包
+  "-analyzeduration", "10000000",        // 增加分析時間
+  "-probesize", "10000000",              // 增加探測大小
+  "-i", RTSP_URL,                        // RTSP 來源
+  "-c:v", "copy",                        // 視訊直接複用，不重編碼
+  "-c:a", "aac",                         // 音訊轉成 AAC
+  "-ar", "44100",                        // 取樣率（攝影機常見 8k，要輸出 HLS 建議轉成 44.1k）
+  "-b:a", "128k",
+  "-f", "hls",                           // 輸出格式 HLS
+  "-hls_time", "2",                      // 每片 TS 長度 2 秒
+  "-hls_list_size", "3",                 // m3u8 保留 3 個片段
+  "-hls_flags", "delete_segments+omit_endlist", // 刪舊檔案，不加結尾
+  path.join(HLS_FOLDER, "stream.m3u8"),  // 輸出目錄
 ]);
 
 ffmpeg.stderr.on("data", (data) => {
-//   console.log(`ffmpeg: ${data.toString()}`);
+  // console.log(`ffmpeg: ${data.toString()}`);
+});
+
+// 監聽錯誤輸出 (stderr) - ffmpeg 大部分訊息都在這裡
+ffmpeg.stderr.on("data", (data) => {
+  // console.error(`stderr: ${data}`);
+});
+
+// 監聽錯誤事件 (spawn 問題)
+ffmpeg.on("error", (err) => {
+  // console.error("Failed to start ffmpeg:", err);
 });
 
 ffmpeg.on("close", (code) => {
-  console.log(`ffmpeg exited with code ${code}`);
+  // console.log(`ffmpeg exited with code ${code}`);
 });
 
 // 前端測試路由
@@ -92,27 +84,6 @@ app.get("/", (req, res) => {
       <source src="/${baseFolderName}/hls/stream.m3u8" type="application/x-mpegURL">
     </video>
   `);
-});
-
-// API: 列出所有錄影檔案
-app.get("/api/records", (req, res) => {
-  const files = fs.readdirSync(RECORD_FOLDER).filter(f => f.endsWith(".mp4"));
-  // 組成符合 HistoryRecord[] 的資料
-  const records = files.map((fileName, index) => ({
-    id: index.toString(), // 或者用 uuid
-    fileUrl: fileName
-  }));
-  res.json(records);
-});
-
-// API: 提供檔案播放
-app.get("/api/records/:filename", (req, res) => {
-  const filepath = path.join(RECORD_FOLDER, req.params.filename);
-  if (fs.existsSync(filepath)) {
-    res.sendFile(filepath);
-  } else {
-    res.status(404).send("File not found");
-  }
 });
 
 app.listen(PORT, () => {
