@@ -17,7 +17,7 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:3000',  // 轉發到後端 API
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, '') // 去掉前綴
+        // rewrite: (path) => path.replace(/^\/api/, '') // 去掉前綴
       },
       '/cam1': {
         target: 'https://su.hackdog.tw', // HLS 或其他服務
