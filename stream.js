@@ -54,8 +54,9 @@ const ffmpeg = spawn("ffmpeg", [
   "-b:a", "128k",
   "-f", "hls",                           // 輸出格式 HLS
   "-hls_time", "2",                      // 每片 TS 長度 2 秒
-  "-hls_list_size", "3",                 // m3u8 保留 3 個片段
+  "-hls_list_size", "5",                 // m3u8 保留 3 個片段
   "-hls_flags", "delete_segments+omit_endlist", // 刪舊檔案，不加結尾
+  "-hls_segment_filename", path.join(HLS_FOLDER, "stream_%03d.ts"),
   path.join(HLS_FOLDER, "stream.m3u8"),  // 輸出目錄
 ]);
 

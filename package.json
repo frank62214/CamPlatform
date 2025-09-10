@@ -13,7 +13,9 @@
     "build-only": "vite build",
     "type-check": "vue-tsc --build",
     "server": "node server.js",
-    "stream": "node stream.js"
+    "stream": "node stream.js",
+    "record": "node record.js",
+    "all": "npm run stream -- 0 && npm run stream -- 1"
   },
   "dependencies": {
     "axios": "^1.11.0",
