@@ -57,7 +57,7 @@ function startRecording(){
   const duration = (RECORD_INTERVAL_MINUTES-min) * 60; // 秒
   const date = dayjs().format('YYYY-MM-DD');
   // 建立歷史紀錄的資料夾
-  const RECORD_FOLDER = path.join(process.cwd(), `/${baseFolderName}/${date}/records`);
+  const RECORD_FOLDER = path.join(process.cwd(), `/${baseFolderName}/${date}`);
   if (!fs.existsSync(RECORD_FOLDER)) {
     fs.mkdirSync(RECORD_FOLDER, { recursive: true });
   }
