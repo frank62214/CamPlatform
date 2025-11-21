@@ -2,3 +2,5 @@ node_modules/*
 hls/*
 dist/*
 records/*
+cam1/*
+cam2/*
