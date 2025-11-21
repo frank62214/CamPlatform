@@ -8,13 +8,18 @@ import dayjs from "dayjs";
 
 const app = express();
 const PORT = 3000;
-const BASE_FOLDER = ".";
+const BASE_FOLDER = "/";
 
 // 前端測試路由
 app.get("/", (req, res) => {
   res.send(`<h1>HLS Streaming Server</h1>
-    <video controls autoplay width="640">
+    <h3>Camera 1</h3>
+    <video controls autoplay muted width="640">
       <source src="/cam1/hls/stream.m3u8" type="application/x-mpegURL">
+    </video>
+    <h3>Camera 2</h3>
+    <video controls autoplay muted width="640">
+      <source src="/cam2/hls/stream.m3u8" type="application/x-mpegURL">
     </video>
   `);
 });
@@ -22,6 +27,7 @@ app.get("/", (req, res) => {
 // HLS 串流路由 - 從 /video/cam1/hls 提供串流影像
 app.use("/cam1/hls", express.static(path.join(BASE_FOLDER, "video", "cam1", "hls"), {
   setHeaders: (res, filePath) => {
+    console.log(filePath);
     // 設定 CORS 和正確的 Content-Type
     res.setHeader("Access-Control-Allow-Origin", "*");
 
@@ -34,7 +40,7 @@ app.use("/cam1/hls", express.static(path.join(BASE_FOLDER, "video", "cam1", "hls
 }));
 
 // HLS 串流路由 - 從 /video/cam1/hls 提供串流影像
-app.use("/cam1/hls", express.static(path.join(BASE_FOLDER, "video", "cam1", "hls"), {
+app.use("/cam2/hls", express.static(path.join(BASE_FOLDER, "video", "cam2", "hls"), {
   setHeaders: (res, filePath) => {
     // 設定 CORS 和正確的 Content-Type
     res.setHeader("Access-Control-Allow-Origin", "*");
