@@ -1,0 +1,19 @@
+# Server Dockerfile
+FROM node:22-alpine
+
+WORKDIR /app
+
+# 複製 package 文件
+COPY package*.json ./
+
+# 安裝生產依賴
+RUN npm ci --only=production
+
+# 複製後端相關文件
+COPY server.js ./
+
+# 暴露端口
+EXPOSE 3000
+
+# 啟動 server
+CMD ["node", "server.js"]
