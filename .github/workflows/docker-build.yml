@@ -3,8 +3,7 @@ name: Build and Push to Harbor
 on:
   push:
     branches: [ main ]
-  pull_request:
-    branches: [ main ]
+  workflow_dispatch:
 
 env:
   REGISTRY: ${{ secrets.HARBOR_URL }}
