@@ -1,0 +1,70 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: camplatform
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: camplatform-video-pvc
+  namespace: camplatform
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: camplatform-server
+  namespace: camplatform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: camplatform-server
+  template:
+    metadata:
+      labels:
+        app: camplatform-server
+    spec:
+      containers:
+      - name: server
+        image: harbor.hackdog.tw/camplatform/server:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 3000
+        volumeMounts:
+        - name: video-storage
+          mountPath: /video
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+      volumes:
+      - name: video-storage
+        persistentVolumeClaim:
+          claimName: camplatform-video-pvc
+      imagePullSecrets:
+      - name: harbor-registry-secret
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: camplatform-server
+  namespace: camplatform
+spec:
+  selector:
+    app: camplatform-server
+  ports:
+  - port: 3000
+    targetPort: 3000
