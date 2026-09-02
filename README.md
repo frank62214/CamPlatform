@@ -32,6 +32,15 @@ npm run preview
 
 正式環境以 same-origin 的 `/cam1`、`/cam2` 讀取串流；`Deployment` repo 的 Ingress 會把這兩個 prefix 轉送到 `ffmpeg/camplatform-server:3000`。
 
+## Docker Hub 與 Argo CD
+
+推送到 `main` 後，GitHub Actions 會使用 `DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN` 建置並推送：
+
+- `hackdog30678/camplatform-server:<git-sha>`
+- `hackdog30678/camplatform-frontend:<git-sha>`
+
+Frontend image 推送成功後，workflow 會使用 `DEPLOY_REPO_TOKEN` 將完整 Git SHA 回寫到 `Deployment/CamPlatform/environments/prod/frontend-values.yml`。Argo CD 偵測到 tag 變更後會自動 rollout；`latest` 只保留給尚未納入 Argo CD 的舊 StreamServer manifest。
+
 ## 安全界線
 
 純前端登入只能隱藏 UI：帳密與登入狀態都可由使用者在瀏覽器內檢視或繞過，也不會保護直接存取的串流 URL。若攝影機影像需要真正的存取控制，必須對整個 hostname 使用 Cloudflare Access、Ingress authentication 或其他伺服器端驗證。

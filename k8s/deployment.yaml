@@ -35,7 +35,7 @@ spec:
     spec:
       containers:
       - name: server
-        image: harbor.hackdog.tw/camplatform/server:latest
+        image: hackdog30678/camplatform-server:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 3000
@@ -54,7 +54,7 @@ spec:
         persistentVolumeClaim:
           claimName: camplatform-video-pvc
       imagePullSecrets:
-      - name: harbor-registry-secret
+      - name: dockerhub-secret
 
 ---
 apiVersion: v1
