@@ -4,9 +4,11 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import vueDevTools from 'vite-plugin-vue-devtools'
 
+const streamProxyTarget = process.env.CAM_STREAM_PROXY_TARGET ?? 'http://127.0.0.1:3000'
+
 // https://vite.dev/config/
 export default defineConfig({
-  base: '/cam/',
+  base: '/',
   plugins: [
     vue(),
     vueDevTools(),
@@ -20,14 +22,12 @@ export default defineConfig({
         rewrite: (path) => path.replace(/^\/api/, '') // 去掉前綴
       },
       '/cam1': {
-        target: 'https://su.hackdog.tw', // HLS 或其他服務
+        target: streamProxyTarget,
         changeOrigin: true,
-        // rewrite: (path) => path.replace(/^\/cam/, '')
       },
       '/cam2': {
-        target: 'https://su.hackdog.tw', // HLS 或其他服務
+        target: streamProxyTarget,
         changeOrigin: true,
-        // rewrite: (path) => path.replace(/^\/cam/, '')
       }
     }
   },

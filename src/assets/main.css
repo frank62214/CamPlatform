@@ -1,35 +1,43 @@
 @import './base.css';
 
+:root {
+  color-scheme: light;
+  font-family:
+    Inter,
+    "Noto Sans TC",
+    "PingFang TC",
+    "Microsoft JhengHei",
+    "Segoe UI",
+    sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
 #app {
-  /* max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
-  font-weight: normal; */
+  min-height: 100%;
 }
 
-a,
-.green {
-  /* text-decoration: none;
-  color: hsla(160, 100%, 37%, 1);
-  transition: 0.4s;
-  padding: 3px; */
+body {
+  min-height: 100vh;
+  margin: 0;
+  background: #071321;
 }
 
-@media (hover: hover) {
-  a:hover {
-    /* background-color: hsla(160, 100%, 37%, 0.2); */
-  }
+button,
+input {
+  font-family: inherit;
 }
 
-@media (min-width: 1024px) {
-  body {
-    /* display: flex;
-    place-items: center; */
-  }
-
-  #app {
-    /* display: grid;
-    grid-template-columns: 1fr 1fr;
-    padding: 0 2rem; */
-  }
+button {
+  cursor: pointer;
 }

@@ -59,10 +59,10 @@ watch(activeTab, (newVal) => {
             <div class="tab-pane fade" :class="{ show: activeTab === 'realtime', active: activeTab === 'realtime' }">
                 <div class="row">
                     <div class="col-md-6">
-                        <CameraView title="即時影像1" videoUrl="https://su.hackdog.tw/cam1" />
+                        <CameraView title="即時影像1" videoUrl="/cam1" />
                     </div>
                     <div class="col-md-6">
-                        <CameraView title="即時影像2" videoUrl="https://su.hackdog.tw/cam2" />
+                        <CameraView title="即時影像2" videoUrl="/cam2" />
                     </div>
                 </div>
             </div>
@@ -80,7 +80,7 @@ watch(activeTab, (newVal) => {
                             <tbody>
                                 <tr v-for="item in cam1historyList" :key="item.id">
                                     <td>
-                                        <a :href="`https://su.hackdog.tw/cam1/api/records/${item.fileUrl}`" target="_blank" class="btn btn-sm btn-primary">
+                                        <a :href="`/cam1/api/records/${item.fileUrl}`" target="_blank" class="btn btn-sm btn-primary">
                                             {{ item.fileUrl }}
                                         </a>
                                     </td>
@@ -102,12 +102,12 @@ watch(activeTab, (newVal) => {
                             <tbody>
                                 <tr v-for="item in cam2historyList" :key="item.id">
                                     <td>
-                                        <a :href="`https://su.hackdog.tw/cam2/api/records/${item.fileUrl}`" target="_blank" class="btn btn-sm btn-primary">
+                                        <a :href="`/cam2/api/records/${item.fileUrl}`" target="_blank" class="btn btn-sm btn-primary">
                                             {{ item.fileUrl }}
                                         </a>
                                     </td>
                                 </tr>
-                                <tr v-if="cam1historyList.length === 0">
+                                <tr v-if="cam2historyList.length === 0">
                                     <td colspan="4" class="text-center text-muted">目前沒有歷史資料</td>
                                 </tr>
                             </tbody>

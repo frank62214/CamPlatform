@@ -6,11 +6,6 @@ interface Props {
 }
 const props = defineProps<Props>();
 const cam = ref<HTMLVideoElement | null>(null);
-// const cam1 = ref<HTMLVideoElement | null>(null);
-// const cam2 = ref<HTMLVideoElement | null>(null);
-
-// const cam1Ip = "https://su.hackdog.tw/cam1";
-// const cam2Ip = "https://su.hackdog.tw/cam2";
 
 function setupHls(video: HTMLVideoElement | null, ip: string) {
     if (!video) return;
@@ -29,7 +24,6 @@ function setupHls(video: HTMLVideoElement | null, ip: string) {
 
 onMounted(() => {
     setupHls(cam.value, props.videoUrl);
-    //   setupHls(cam2.value, cam2Ip);
 });
 </script>
 
