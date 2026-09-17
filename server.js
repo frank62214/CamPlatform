@@ -1,79 +1,42 @@
 import express from "express";
-import { spawn } from "child_process";
-import fs from "fs";
-import path from "path";
-import { exec } from "child_process";
-import cron from "node-cron";
-import dayjs from "dayjs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { createRecordRouter } from "./server/records.js";
 
-const app = express();
-const PORT = 3000;
-const BASE_FOLDER = "/";
+export function createApp({ videoRoot = process.env.VIDEO_ROOT || "/video" } = {}) {
+  const app = express();
+  app.get("/", (_req, res) => res.json({ status: "ok" }));
 
-// 前端測試路由
-app.get("/", (req, res) => {
-  res.send(`<h1>HLS Streaming Server</h1>
-    <h3>Camera 1</h3>
-    <video controls autoplay muted width="640">
-      <source src="/cam1/hls/stream.m3u8" type="application/x-mpegURL">
-    </video>
-    <h3>Camera 2</h3>
-    <video controls autoplay muted width="640">
-      <source src="/cam2/hls/stream.m3u8" type="application/x-mpegURL">
-    </video>
-  `);
-});
-
-// HLS 串流路由 - 從 /video/cam1/hls 提供串流影像
-app.use("/cam1/hls", express.static(path.join(BASE_FOLDER, "video", "cam1", "hls"), {
-  setHeaders: (res, filePath) => {
-    console.log(filePath);
-    // 設定 CORS 和正確的 Content-Type
-    res.setHeader("Access-Control-Allow-Origin", "*");
-
-    if (filePath.endsWith(".m3u8")) {
-      res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-    } else if (filePath.endsWith(".ts")) {
-      res.setHeader("Content-Type", "video/mp2t");
-    }
-  }
-}));
-
-// HLS 串流路由 - 從 /video/cam1/hls 提供串流影像
-app.use("/cam2/hls", express.static(path.join(BASE_FOLDER, "video", "cam2", "hls"), {
-  setHeaders: (res, filePath) => {
-    // 設定 CORS 和正確的 Content-Type
-    res.setHeader("Access-Control-Allow-Origin", "*");
-
-    if (filePath.endsWith(".m3u8")) {
-      res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-    } else if (filePath.endsWith(".ts")) {
-      res.setHeader("Content-Type", "video/mp2t");
-    }
-  }
-}));
-
-// 工具：取得今天往前推N天的日期（YYYYMMDD）
-function getPast7Days() {
-  const dates = [];
-  const today = new Date();
-
-  for (let i = 0; i < 7; i++) {
-    const d = new Date(today);
-    d.setDate(today.getDate() - i);
-
-    const yyyy = d.getFullYear().toString();
-    const mm = (d.getMonth() + 1).toString().padStart(2, '0');
-    const dd = d.getDate().toString().padStart(2, '0');
-
-    dates.push(`${yyyy}${mm}${dd}`);
+  for (const camera of ["cam1", "cam2"]) {
+    app.use(`/${camera}/api/records`, createRecordRouter(videoRoot, camera));
+    app.use(`/${camera}/hls`, express.static(path.join(videoRoot, camera, "hls"), {
+      setHeaders(res, filePath) {
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        if (filePath.endsWith(".m3u8")) {
+          res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+          res.setHeader("Cache-Control", "no-store");
+        } else if (filePath.endsWith(".ts")) {
+          res.setHeader("Content-Type", "video/mp2t");
+        }
+      },
+    }));
   }
 
-  return dates;
+  app.use((_req, res) => res.status(404).json({ error: "找不到指定的資源。" }));
+  app.use((error, _req, res, next) => {
+    if (res.headersSent) return next(error);
+    const status = error.status || error.statusCode || 503;
+    if (status >= 500) console.error("Recording storage error:", error.code || error.message);
+    res.status(status).json({
+      error: error.publicMessage || (status === 416
+        ? "要求的播放範圍無效。"
+        : status < 500 ? "找不到指定的錄影。" : "無法讀取錄影儲存空間，請稍後重試。"),
+    });
+  });
+  return app;
 }
 
-app.listen(PORT, () => {
-  console.log(`✅ Server running on http://localhost:${PORT}`);
-});
-
-
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  const port = Number(process.env.PORT || 3000);
+  createApp().listen(port, () => console.log(`Camera server listening on port ${port}`));
+}

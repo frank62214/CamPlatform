@@ -11,6 +11,7 @@ RUN npm ci --only=production
 
 # 複製後端相關文件
 COPY server.js ./
+COPY server ./server
 
 # 暴露端口
 EXPOSE 3000

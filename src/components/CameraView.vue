@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, onBeforeUnmount } from "vue";
+import type Hls from "hls.js";
 interface Props {
     title: string;
     videoUrl: string;
 }
 const props = defineProps<Props>();
 const cam = ref<HTMLVideoElement | null>(null);
+let hls: Hls | undefined;
+let disposed = false;
 
 function setupHls(video: HTMLVideoElement | null, ip: string) {
     if (!video) return;
@@ -13,8 +16,8 @@ function setupHls(video: HTMLVideoElement | null, ip: string) {
         console.log("Native HLS supported");
     } else {
         import("hls.js").then((Hls) => {
-            if (Hls.default.isSupported()) {
-                const hls = new Hls.default();
+            if (!disposed && Hls.default.isSupported()) {
+                hls = new Hls.default();
                 hls.loadSource(ip + "/hls/stream.m3u8");
                 hls.attachMedia(video);
             }
@@ -24,6 +27,17 @@ function setupHls(video: HTMLVideoElement | null, ip: string) {
 
 onMounted(() => {
     setupHls(cam.value, props.videoUrl);
+});
+
+onBeforeUnmount(() => {
+    disposed = true;
+    hls?.destroy();
+    if (cam.value) {
+        cam.value.pause();
+        cam.value.removeAttribute('src');
+        cam.value.querySelector('source')?.removeAttribute('src');
+        cam.value.load();
+    }
 });
 </script>
 

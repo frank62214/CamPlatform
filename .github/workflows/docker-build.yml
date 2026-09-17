@@ -13,8 +13,22 @@ env:
   DOCKERHUB_NAMESPACE: hackdog30678
 
 jobs:
+  validate:
+    name: Test and Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
   build-server:
     name: Build Server Image
+    needs: validate
     runs-on: ubuntu-latest
 
     steps:
@@ -52,6 +66,7 @@ jobs:
 
   build-frontend:
     name: Build Frontend Image
+    needs: validate
     runs-on: ubuntu-latest
 
     steps:
@@ -89,7 +104,7 @@ jobs:
 
   update-deployment:
     name: Update Deployment Image Tag
-    needs: build-frontend
+    needs: [build-server, build-frontend]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
 
@@ -101,7 +116,7 @@ jobs:
           ref: main
           token: ${{ secrets.DEPLOY_REPO_TOKEN }}
 
-      - name: Update frontend image tag
+      - name: Update frontend and server image tags
         env:
           IMAGE_TAG: ${{ github.sha }}
         run: |
@@ -109,38 +124,39 @@ jobs:
           import os
           from pathlib import Path
 
-          values_path = Path("CamPlatform/environments/prod/frontend-values.yml")
-          lines = values_path.read_text(encoding="utf-8").splitlines()
-          in_image = False
-          updated = False
+          for component in ("frontend", "server"):
+              values_path = Path(f"CamPlatform/environments/prod/{component}-values.yml")
+              lines = values_path.read_text(encoding="utf-8").splitlines()
+              in_image = False
+              updated = False
 
-          for index, line in enumerate(lines):
-              if line == "image:":
-                  in_image = True
-                  continue
-              if in_image and not line.startswith("  "):
-                  break
-              if in_image and line.startswith("  tag:"):
-                  lines[index] = f"  tag: {os.environ['IMAGE_TAG']}"
-                  updated = True
-                  break
+              for index, line in enumerate(lines):
+                  if line == "image:":
+                      in_image = True
+                      continue
+                  if in_image and not line.startswith("  "):
+                      break
+                  if in_image and line.startswith("  tag:"):
+                      lines[index] = f"  tag: {os.environ['IMAGE_TAG']}"
+                      updated = True
+                      break
 
-          if not updated:
-              raise RuntimeError("image.tag was not found in frontend values")
+              if not updated:
+                  raise RuntimeError(f"image.tag was not found in {values_path}")
 
-          values_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+              values_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
           PY
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add CamPlatform/environments/prod/frontend-values.yml
+          git add CamPlatform/environments/prod/frontend-values.yml CamPlatform/environments/prod/server-values.yml
 
           if git diff --cached --quiet; then
             echo "Image tag is already current"
             exit 0
           fi
 
-          git commit -m "chore(prod): update CamPlatform frontend image to ${IMAGE_TAG}"
+          git commit -m "chore(prod): update CamPlatform images to ${IMAGE_TAG}"
 
           for attempt in 1 2 3; do
             git pull --rebase origin main
