@@ -87,7 +87,25 @@ function handleLogout() {
 }
 
 .monitor-main {
-  padding: 0.25rem 0 3rem;
+  padding: 0.25rem 0 0.75rem;
+}
+
+@media (min-width: 992px) and (min-height: 820px) {
+  .monitor-shell {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+  }
+
+  .monitor-header {
+    flex-shrink: 0;
+  }
+
+  .monitor-main {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+  }
 }
 
 @media (max-width: 520px) {

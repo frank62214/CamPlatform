@@ -183,5 +183,13 @@ onBeforeUnmount(() => {
 .record-note { font-size: 0.74rem; color: #697988; margin: 0.85rem 0 0; }
 .playback-error { color: #9b3e30; font-size: 0.8rem; margin: 0.75rem 0 0; }
 button:focus-visible, select:focus-visible, a:focus-visible { outline: 3px solid #55b6c0; outline-offset: 2px; }
+
+@media (min-width: 992px) and (min-height: 820px) {
+  .history-card { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+  .history-card > :not(.record-list) { flex-shrink: 0; }
+  .playback video:not(:fullscreen), .player-placeholder { max-height: max(12rem, calc(100dvh - 42rem)); object-fit: contain; }
+  .record-list { flex: 1 1 0; min-height: 4rem; max-height: none; overscroll-behavior-y: contain; scrollbar-gutter: stable; }
+}
+
 @media (max-width: 480px) { .history-card { padding: 1rem; } }
 </style>
