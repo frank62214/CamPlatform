@@ -76,7 +76,10 @@ async function inspectRecord(folder, date, fileName, camera) {
   } finally {
     await file.close();
   }
-  const timeMatch = fileName.replace(`${date}_`, "").match(/^(\d{2})(?:[-_]?(\d{2}))?(?:[-_]?(\d{2}))?\.mp4$/i);
+  // A process UUID prevents a recorder restart from replacing an earlier clip.
+  // Hour-only legacy names describe an hour bucket, not a verified HH:00 start.
+  const stem = fileName.startsWith(`${date}_`) ? fileName.slice(date.length + 1) : fileName;
+  const timeMatch = stem.match(/^(\d{2})(?:[-_]?(\d{2}))?(?:[-_]?(\d{2}))?(?:_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})?\.mp4$/i);
   const time = timeMatch && Number(timeMatch[1]) < 24
     && Number(timeMatch[2] || 0) < 60 && Number(timeMatch[3] || 0) < 60
     ? `${timeMatch[1]}:${timeMatch[2] || "00"}:${timeMatch[3] || "00"}` : null;
@@ -85,6 +88,7 @@ async function inspectRecord(folder, date, fileName, camera) {
     fileName,
     date,
     time,
+    timePrecision: time ? (timeMatch[3] ? "second" : timeMatch[2] ? "minute" : "hour") : null,
     size: info.size,
     updatedAt: info.mtime.toISOString(),
     status: ready ? "ready" : Date.now() - info.mtimeMs < 120_000 ? "recording" : "unavailable",
@@ -106,8 +110,21 @@ export function createRecordRouter(videoRoot, camera) {
     }
     const root = await cameraRoot(videoRoot, camera);
     const entries = await readdir(root, { withFileTypes: true });
-    const dates = entries.filter(entry => entry.isDirectory() && validDate(entry.name))
-      .map(entry => entry.name).sort().reverse();
+    const dates = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !validDate(entry.name)) continue;
+      // Recorders prepare tomorrow's folder before midnight. An empty folder is
+      // not a recording date and must not hide today's clips on initial load.
+      const candidate = await dateFolder(root, entry.name);
+      if (!candidate) continue;
+      try {
+        const files = await readdir(candidate, { withFileTypes: true });
+        if (files.some(file => file.isFile() && validFile(file.name))) dates.push(entry.name);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    }
+    dates.sort().reverse();
     const date = requestedDate || dates[0] || null;
     const folder = date && await dateFolder(root, date);
     const records = [];

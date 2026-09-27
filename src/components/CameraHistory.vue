@@ -6,6 +6,7 @@ interface HistoryRecord {
   fileName: string
   date: string
   time: string | null
+  timePrecision?: 'hour' | 'minute' | 'second' | null
   size: number
   status: 'ready' | 'recording' | 'unavailable'
   fileUrl: string | null
@@ -79,6 +80,15 @@ function formatSize(bytes: number) {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
 }
 
+function timeLabel(record: HistoryRecord) {
+  if (!record.time) return record.fileName
+  // Also recognize legacy names while frontend/server roll out separately.
+  const hourly = record.timePrecision === 'hour'
+    || /^(?:\d{4}-\d{2}-\d{2}_)?\d{2}\.mp4$/i.test(record.fileName)
+  if (hourly) return `${record.time.slice(0, 2)} 時（起點未校準）`
+  return record.timePrecision === 'minute' ? record.time.slice(0, 5) : record.time
+}
+
 onMounted(() => fetchHistory())
 onBeforeUnmount(() => {
   const current = request
@@ -115,7 +125,7 @@ onBeforeUnmount(() => {
         <video ref="player" :key="selected.id" :src="selected.fileUrl" :aria-label="`${title}錄影播放器`"
           controls playsinline preload="metadata" @error="playbackError = true"></video>
         <div class="playback-caption">
-          <span>{{ selected.date }} · {{ selected.time || selected.fileName }}</span>
+          <span>{{ selected.date }} · {{ timeLabel(selected) }}</span>
           <a :href="selected.fileUrl" :download="selected.fileName">下載錄影</a>
         </div>
         <p v-if="playbackError" class="playback-error" role="alert">
@@ -134,7 +144,7 @@ onBeforeUnmount(() => {
         <li v-for="record in records" :key="record.id">
           <button type="button" class="record-button" :class="{ 'is-selected': selected?.id === record.id }"
             :disabled="record.status !== 'ready'" :aria-pressed="selected?.id === record.id" @click="selectRecord(record)">
-            <span class="record-details"><strong>{{ record.time || record.fileName }}</strong>
+            <span class="record-details"><strong>{{ timeLabel(record) }}</strong>
               <span class="record-file">{{ record.fileName }} · {{ formatSize(record.size) }}</span></span>
             <span class="record-status" :class="`record-status--${record.status}`">
               {{ record.status === 'recording' ? '錄製中' : record.status === 'unavailable' ? '檔案未完成' : selected?.id === record.id ? '已選取' : '播放' }}

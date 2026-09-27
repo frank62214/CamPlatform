@@ -45,6 +45,12 @@ slave02 的 `/data/cam1`、`/data/cam2` 由既有 NFS PVC `nfs-data-pvc` 掛載�
 
 也支援舊版 `YYYY-MM-DD/HH.mp4`。影片不需複製或重新編碼；API 檢查 MP4 的 `moov` / `mdat` 結構，只讀取少量標頭並跳過影片內容，避免讀取整個大型檔案。近期仍未封檔的片段顯示「錄製中」；超過兩分鐘未更新且未封檔則顯示「檔案未完成」。播放是否成功仍取決於檔案內容與瀏覽器的編碼支援。
 
+兩個播放器各自選片、播放與拖曳，沒有自動同步。舊錄影器使用「啟動後每 3600 秒」切檔，但檔名只有小時；例如同名的 `22.mp4` 可能分別從 22:03 和 22:46 開始。這類檔案現在顯示「22 時（起點未校準）」，不能把播放器第 0 秒當成 22:00。舊影片保留原樣；封檔時間減片長只能估算起點，精確對照仍應以畫面時鐘或共同事件校準。
+
+配合 Deployment 錄影器修正，新檔支援 `YYYY-MM-DD_HH-MM-SS_<process-UUID>.mp4`，以整點切檔並保留秒數及每次錄影程序的識別碼，避免同小時重啟覆蓋前段。關鍵影格與串流延遲仍可能造成秒級偏移；檔名時間是伺服器開檔時間，不代表經校準的攝影機拍攝時間。API 額外回傳 `timePrecision`（`hour`、`minute`、`second` 或 `null`）表達檔名精度，並忽略錄影器預先建立的空日期資料夾。
+
+部署順序為先更新本專案的 server／frontend，再更新 Deployment 的錄影器 chart。切檔選項見 [FFmpeg segment 文件](https://ffmpeg.org/ffmpeg-formats.html#segment)。
+
 API：
 
 - `GET /cam1/api/records`：回傳 `{ camera, date, dates, records }`，預設最新日期。

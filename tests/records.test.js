@@ -15,7 +15,7 @@ const completeMp4 = Buffer.concat([atom("ftyp"), atom("mdat"), atom("moov")]);
 let root, base, server;
 before(async () => {
   root = await mkdtemp(path.join(os.tmpdir(), "camplatform-records-"));
-  for (const folder of ["cam1/2026-09-17", "cam1/2026-08-01", "cam1/hls", "cam1/2026-02-30", "cam2"]) {
+  for (const folder of ["cam1/2026-09-17", "cam1/2026-08-01", "cam1/2026-09-19", "cam1/2026-09-20", "cam1/hls", "cam1/2026-02-30", "cam2"]) {
     await mkdir(path.join(root, folder), { recursive: true });
   }
   for (const name of ["2026-09-17_08.mp4", "09.mp4", "2026-09-17_10-15-30.mp4"]) {
@@ -26,6 +26,7 @@ before(async () => {
   await writeFile(path.join(root, "cam1/2026-09-17/12.mp4"), atom("mdat"));
   await utimes(path.join(root, "cam1/2026-09-17/12.mp4"), new Date(0), new Date(0));
   await writeFile(path.join(root, "cam1/2026-09-17/secret.txt"), "private");
+  await writeFile(path.join(root, "cam1/2026-09-20/.keep"), "");
   await writeFile(path.join(root, "cam1/hls/stream.m3u8"), "#EXTM3U\n");
   server = createApp({ videoRoot: root }).listen(0, "127.0.0.1");
   await new Promise(resolve => server.once("listening", resolve));
@@ -48,15 +49,58 @@ test("lists all dates, defaults to latest and returns descending times and usabl
   assert.equal(data.date, "2026-09-17");
   assert.equal(data.records.length, 5);
   assert.deepEqual(data.records.map(record => record.time), ["12:00:00", "11:00:00", "10:15:30", "09:00:00", "08:00:00"]);
+  assert.deepEqual(data.records.map(record => record.timePrecision), ["hour", "hour", "second", "hour", "hour"]);
   assert.deepEqual(data.records.map(record => record.status), ["unavailable", "recording", "ready", "ready", "ready"]);
   assert.equal(data.records[0].fileUrl, null);
   assert.equal(data.records[2].fileUrl, "/cam1/api/records/2026-09-17/2026-09-17_10-15-30.mp4");
+});
+
+test("keeps separate same-hour restarts and exposes filename precision without inventing capture times", async () => {
+  const folder = path.join(root, "cam1/2026-09-18");
+  await mkdir(folder);
+  const names = [
+    "2026-09-18_10-03-19_11111111-1111-4111-8111-111111111111.mp4",
+    "2026-09-18_10-03-19_22222222-2222-4222-8222-222222222222.mp4",
+    "2026-09-18_10-46-46_33333333-3333-4333-8333-333333333333.mp4",
+    "2026-09-18_10-47.mp4", "2026-09-18_25-61-61.mp4",
+  ];
+  try {
+    for (const name of names) await writeFile(path.join(folder, name), completeMp4);
+    const data = await (await fetch(`${base}/cam1/api/records?date=2026-09-18`)).json();
+    assert.equal(data.records.length, 5);
+    for (const [index, name] of names.entries()) {
+      const record = data.records.find(record => record.fileName === name);
+      assert.equal(record.timePrecision, index < 3 ? "second" : index === 3 ? "minute" : null);
+      assert.equal(record.time, ["10:03:19", "10:03:19", "10:46:46", "10:47:00", null][index]);
+      assert.equal(record.status, "ready");
+      assert.equal((await fetch(base + record.fileUrl, { method: "HEAD" })).status, 200);
+      assert.equal(record.startedAt, undefined);
+    }
+  } finally {
+    await rm(folder, { recursive: true });
+  }
 });
 
 test("can browse older than seven days and recognizes faststart MP4", async () => {
   const data = await (await fetch(`${base}/cam1/api/records?date=2026-08-01`)).json();
   assert.equal(data.records.length, 1);
   assert.equal(data.records[0].status, "ready");
+});
+
+test("ignores precreated empty days and discovers them once recording starts", async () => {
+  const file = path.join(root, "cam1/2026-09-19/00-00-02.mp4");
+  const before = await (await fetch(`${base}/cam1/api/records`)).json();
+  assert.equal(before.date, "2026-09-17");
+  assert.ok(!before.dates.includes("2026-09-19"));
+  assert.ok(!before.dates.includes("2026-09-20"));
+  try {
+    await writeFile(file, atom("mdat"));
+    const after = await (await fetch(`${base}/cam1/api/records`)).json();
+    assert.equal(after.date, "2026-09-19");
+    assert.equal(after.records[0].status, "recording");
+  } finally {
+    await rm(file);
+  }
 });
 
 test("separates empty cameras and dates from unavailable storage", async () => {

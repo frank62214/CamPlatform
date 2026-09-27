@@ -24,7 +24,7 @@ const cameras = [{ id: 'cam1', title: '客廳' }, { id: 'cam2', title: '大門' 
     <section v-else class="history-section" aria-labelledby="history-heading">
       <div class="history-heading">
         <h1 id="history-heading">歷史錄影</h1>
-        <p>選擇日期與時段，回看攝影機畫面。時段依錄影檔名顯示（台北時間 UTC+8）。</p>
+        <p>兩台攝影機各自選片與播放。時間依錄影檔名顯示（台北時間 UTC+8）；舊檔僅記錄小時，相同時段不代表相同起點。</p>
       </div>
       <div class="history-grid">
         <div v-for="camera in cameras" :key="camera.id">
