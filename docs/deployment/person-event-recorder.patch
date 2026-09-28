@@ -1,0 +1,20 @@
+diff --git a/CamPlatform/FFMPEG/templates/deployment.yaml b/CamPlatform/FFMPEG/templates/deployment.yaml
+--- a/CamPlatform/FFMPEG/templates/deployment.yaml
++++ b/CamPlatform/FFMPEG/templates/deployment.yaml
+@@ -66,7 +66,7 @@ spec:
+               -segment_time 3600 \
+               -reset_timestamps 1 \
+               -strftime 1 \
+-              /data/{{ .name }}/%Y-%m-%d/%Y-%m-%d_%H.mp4 \
++              /data/{{ .name }}/%Y-%m-%d/%Y-%m-%d_%H-%M-%S.mp4 \
+               \
+               -map 0:v -map 0:a? -c:v copy -c:a aac -b:a 128k \
+               -f hls \
+@@ -74,6 +74,6 @@ spec:
+               -hls_time 3 \
+               -hls_list_size 10 \
+-              -hls_flags delete_segments+append_list \
++              -hls_flags delete_segments+append_list+program_date_time \
+               /data/{{ .name }}/hls/stream.m3u8
+       restartPolicy: Always
+       volumes:

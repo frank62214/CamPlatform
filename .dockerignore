@@ -11,3 +11,11 @@ dist
 Dockerfile*
 .dockerignore
 .github
+.agent-collaboration
+tests
+*.secret.json
+cam1
+cam2
+records
+hls
+data

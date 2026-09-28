@@ -4,3 +4,10 @@ dist/*
 records/*
 cam1/*
 cam2/*
+
+# Authentication and local verification artifacts
+.env
+.env.*
+!.env.example
+*.secret.json
+.agent-collaboration/

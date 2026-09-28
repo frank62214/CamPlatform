@@ -1,70 +1,9 @@
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: camplatform
-
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: camplatform-video-pvc
-  namespace: camplatform
-spec:
-  accessModes:
-  - ReadWriteOnce
-  resources:
-    requests:
-      storage: 50Gi
-
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: camplatform-server
-  namespace: camplatform
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: camplatform-server
-  template:
-    metadata:
-      labels:
-        app: camplatform-server
-    spec:
-      containers:
-      - name: server
-        image: hackdog30678/camplatform-server:latest
-        imagePullPolicy: Always
-        ports:
-        - containerPort: 3000
-        volumeMounts:
-        - name: video-storage
-          mountPath: /video
-        resources:
-          requests:
-            memory: "256Mi"
-            cpu: "250m"
-          limits:
-            memory: "1Gi"
-            cpu: "1000m"
-      volumes:
-      - name: video-storage
-        persistentVolumeClaim:
-          claimName: camplatform-video-pvc
-      imagePullSecrets:
-      - name: dockerhub-secret
-
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: camplatform-server
-  namespace: camplatform
-spec:
-  selector:
-    app: camplatform-server
-  ports:
-  - port: 3000
-    targetPort: 3000
+# Retired: deploy through the Deployment repository's CamPlatform Helm charts.
+# The old example created an empty PVC in another namespace and used :latest.
+# It must not be applied alongside the JWT backend.
+#
+# See ../README.md and Deployment/CamPlatform/README.md for migration:
+# - Keep existing recording PVCs/PVs.
+# - Stop old unauthenticated workloads and external access routes.
+# - Create camplatform-auth in ffmpeg, then use the existing nfs-data-pvc.
+# - Let Argo CD manage camplatform-server and both immutable image tags.

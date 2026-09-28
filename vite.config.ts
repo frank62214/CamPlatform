@@ -17,17 +17,12 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:3000',  // 轉發到後端 API
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, '') // 去掉前綴
-      },
-      '/cam1': {
         target: streamProxyTarget,
-        changeOrigin: true,
+        changeOrigin: false,
       },
-      '/cam2': {
+      '^/[^/]+/(?:hls|api/records)(?:/|$)': {
         target: streamProxyTarget,
-        changeOrigin: true,
+        changeOrigin: false,
       }
     }
   },
