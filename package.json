@@ -7,23 +7,32 @@
     "node": "^20.19.0 || >=22.12.0"
   },
   "scripts": {
-    "test": "node --test",
     "dev": "vite",
     "build": "run-p type-check \"build-only {@}\" --",
     "preview": "vite preview",
     "build-only": "vite build",
     "type-check": "vue-tsc --build",
     "server": "node server.js",
+    "server:dev": "node --env-file=.env server.js",
+    "test": "node --test tests/*.test.js",
+    "auth:setup": "node scripts/auth-setup.js",
+    "auth:secret": "node scripts/auth-secret.js",
     "stream": "node stream.js",
     "record": "node record.js",
     "all": "npm run stream -- 0 && npm run stream -- 1"
   },
   "dependencies": {
+    "@tensorflow-models/coco-ssd": "^2.2.3",
+    "@tensorflow/tfjs-backend-cpu": "^4.22.0",
+    "@tensorflow/tfjs-backend-webgl": "^4.22.0",
+    "@tensorflow/tfjs-converter": "^4.22.0",
+    "@tensorflow/tfjs-core": "^4.22.0",
     "axios": "^1.11.0",
     "bootstrap": "^5.3.8",
     "dayjs": "^1.11.18",
     "express": "^5.1.0",
     "hls.js": "^1.6.11",
+    "jose": "^6.2.12",
     "node-cron": "^4.2.1",
     "vue": "^3.5.18"
   },

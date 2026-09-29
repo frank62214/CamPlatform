@@ -1,89 +1,141 @@
 # CamPlatform
 
-Vue 3 + Vite 的雙攝影機監控前端，提供即時 HLS 與錄影回放。登入驗證依需求完全在瀏覽器內完成，不需要後端。
+Vue 3 + Express 5 的攝影機監控平台。登入由後端驗證 scrypt 密碼雜湊並簽發 JWT；即時 HLS（playlist / segment）、歷史清單及 MP4 回放（GET / HEAD / Range）都必須攜帶有效 token。前端以同源 HttpOnly Cookie 傳送，API client 也可用 Bearer；不再把帳密放進前端，也不把 token 放進 URL 或 sessionStorage。
 
-## 本機開發
+## 本機啟動
+
+需要 Node.js 20.19+ 或 22.12+；CI / Docker 使用 Node 22。
 
 ```powershell
-npm install
+npm ci
+npm run auth:setup
+```
+
+此指令互動輸入帳號及至少 12 字元密碼（隱藏輸入），產生 `.env`，內含隨機 JWT 簽章 key 與 scrypt 密碼 hash。既有檔案不會被覆寫。請將 `.env` 的 `DATA_ROOT` 設為本機或已掛載的錄影根目錄，例如 `C:/camera-data`；Linux 上預設 `/data`。只有一台相機時設 `CAMERA_IDS=cam1`。
+
+```powershell
+# Terminal 1
+npm run server:dev
+
+# Terminal 2
 npm run dev
 ```
 
-開發伺服器預設把 `/cam1`、`/cam2` 轉送到 `http://127.0.0.1:3000`。若要讀取 Kubernetes 內既有的 stream server，可先執行：
+開啟 Vite 顯示的網址（預設 `http://localhost:5173`）。Vite 保留 `/api` 前綴及 Host，將 API / media 代理到 `http://127.0.0.1:3000`；可用 `CAM_STREAM_PROXY_TARGET` 覆寫。`npm run server` 讀取程序環境變數，`server:dev` 才會載入 `.env`。`npm run preview` 只預覽靜態前端，不提供 API 代理；整合測試請使用 `npm run dev` 或正式 Ingress。
 
-```powershell
-kubectl -n ffmpeg port-forward service/camplatform-server 3000:3000
-```
+## 既有錄影格式
 
-也可以覆寫 proxy 目標：
-
-```powershell
-$env:CAM_STREAM_PROXY_TARGET = 'https://your-stream-host.example'
-npm run dev
-Remove-Item Env:CAM_STREAM_PROXY_TARGET
-```
-
-## 正式建置
-
-```powershell
-npm run build
-npm run preview
-```
-
-正式環境以 same-origin 的 `/cam1`、`/cam2` 讀取串流；`Deployment` repo 的 Ingress 會把這兩個 prefix 轉送到 `ffmpeg/camplatform-server:3000`。
-
-## 歷史錄影
-
-登入後切換「歷史影像」，可分別選擇客廳（cam1）與大門（cam2）的日期、時段，在頁內播放、拖曳進度或下載 MP4。預設載入各攝影機最新的日期，保留的舊日期都可以查詢。重新整理會更新片段狀態；錄製中或未完成的檔案不開放播放。
-
-slave02 的 `/data/cam1`、`/data/cam2` 由既有 NFS PVC `nfs-data-pvc` 掛載到 stream server 的 `/video`。後端預設讀取：
+後端只讀取現有檔案，不寫入、刪除或重新編碼錄影：
 
 ```text
-/video/cam1/YYYY-MM-DD/YYYY-MM-DD_HH.mp4
-/video/cam2/YYYY-MM-DD/YYYY-MM-DD_HH.mp4
+/data/
+  cam1/
+    hls/stream.m3u8
+    hls/stream0.ts
+    2026-09-07/2026-09-07_23.mp4
+    2026-09-06/12.mp4
+  cam2/
+    ...
 ```
 
-也支援舊版 `YYYY-MM-DD/HH.mp4`。影片不需複製或重新編碼；API 檢查 MP4 的 `moov` / `mdat` 結構，只讀取少量標頭並跳過影片內容，避免讀取整個大型檔案。近期仍未封檔的片段顯示「錄製中」；超過兩分鐘未更新且未封檔則顯示「檔案未完成」。播放是否成功仍取決於檔案內容與瀏覽器的編碼支援。
+支援目前 FFMPEG recorder 的 `YYYY-MM-DD/YYYY-MM-DD_HH-MM-SS_UUID.mp4`、不含 UUID 的秒級檔名，以及舊版小時／分鐘檔名（含 `HH.mp4`、`HHMM.mp4`、`HHMMSS.mp4`）。UUID 保留重啟前的片段，避免同一時段覆寫。其他安全名稱的 `.mp4` 也可列出，時間回退使用檔案 mtime。檔名時間以 `RECORDING_UTC_OFFSET=+08:00` 解讀，並回傳時間精度；小時檔名不代表實際起點恰好在整點。日期資料夾必須是有效的 `YYYY-MM-DD`，預先建立但沒有錄影的空日期不會搶走預設選取。不提供任意靜態根目錄，不允許路徑穿越或 symlink 跳出錄影目錄。
 
-兩個播放器各自選片、播放與拖曳，沒有自動同步。舊錄影器使用「啟動後每 3600 秒」切檔，但檔名只有小時；例如同名的 `22.mp4` 可能分別從 22:03 和 22:46 開始。這類檔案現在顯示「22 時（起點未校準）」，不能把播放器第 0 秒當成 22:00。舊影片保留原樣；封檔時間減片長只能估算起點，精確對照仍應以畫面時鐘或共同事件校準。
+一般 MP4 需有完整的 ftyp / mdat / moov 頂層區塊才可播放；FFmpeg 結束片段後才寫入 moov。歷史清單會區分可播放、錄製中及未完成的檔案，未完成的 `fileUrl` 為 null，直接讀取會回 409。此檢查確認容器結構，不能修復損壞影片或保證所有攝影機 codec 都能被瀏覽器解碼。HLS 分段不套用此完成檢查。
 
-配合 Deployment 錄影器修正，新檔支援 `YYYY-MM-DD_HH-MM-SS_<process-UUID>.mp4`，以整點切檔並保留秒數及每次錄影程序的識別碼，避免同小時重啟覆蓋前段。關鍵影格與串流延遲仍可能造成秒級偏移；檔名時間是伺服器開檔時間，不代表經校準的攝影機拍攝時間。API 額外回傳 `timePrecision`（`hour`、`minute`、`second` 或 `null`）表達檔名精度，並忽略錄影器預先建立的空日期資料夾。
+`/readyz` 會確認所有 `CAMERA_IDS` 目錄可讀；不需先有影片，但不能掛到空白或錯誤的儲存根目錄。檔案必須允許容器 UID/GID 1000 讀取及目錄 traversal。
 
-部署順序為先更新本專案的 server／frontend，再更新 Deployment 的錄影器 chart。切檔選項見 [FFmpeg segment 文件](https://ffmpeg.org/ffmpeg-formats.html#segment)。
+## API
 
-API：
+除登入、內部 health/readiness 外，每條路由都先驗證 JWT，包含不存在的 media、HEAD、Range 與舊路徑。無 token、過期、錯誤簽章、已登出 token 均回 401。
 
-- `GET /cam1/api/records`：回傳 `{ camera, date, dates, records }`，預設最新日期。
-- `GET /cam1/api/records?date=2026-09-17`：指定日期（台北時間的錄影檔名）。
-- `GET /cam1/api/records/2026-09-17/2026-09-17_08.mp4`：原始 MP4，支援 HEAD 與 HTTP Range，方便跳轉影片進度。
-- cam2 使用相同端點格式；缺少儲存掛載回傳 503，無錄影日期回傳空列表，不會混為同一狀態。
+| 方法 / 路徑 | 用途 |
+| --- | --- |
+| `POST /api/auth/login` | JSON `{username,password}`；回傳 user、expiresAt、accessToken 並設定 HttpOnly Cookie |
+| `GET /api/auth/me` | 回傳目前 user 與到期時間 |
+| `POST /api/auth/logout` | 撤銷這次登入的 token 並清除 Cookie |
+| `GET /api/cameras` | 攝影機與同源 liveUrl |
+| `GET /api/cameras/:id/dates` | 日期資料夾，最新在前；可能包含目前仍在錄影的日期 |
+| `GET /api/cameras/:id/records?date=YYYY-MM-DD&limit=20&offset=0` | `{records,total,limit,offset}`；date 可省略，limit 預設 50、上限 100 |
+| `GET /api/cameras/:id/event-clip?at=2026-09-28T12:00:00Z` | 尋找事件前後各 10 秒；回傳 `status,parts,approximate,partial`，每段含 `record,startSeconds,endSeconds` |
+| `GET /:id/hls/:filename` | 驗證後傳送 HLS playlist / segment |
+| `GET /:id/api/records/:date/:filename` | MP4；支援單一 Range、206、416 及 HEAD |
+| `GET /:id/api/records` | 保留旧 list 路徑，回傳同樣受保護的 records array，支援同樣查詢參數 |
+| `GET /healthz`, `GET /readyz` | 程序／儲存狀態，供 Kubernetes probe 使用 |
 
-本機若直接使用 slave02 的資料目錄，可設定 `VIDEO_ROOT=/data`；Windows 測試也可指定本機資料夾：
+每筆錄影包含 `id,name,date,timeStamp,size,fileUrl`，另有 `time,timePrecision,status` 等顯示資訊。可播放的 `fileUrl` 已是完整的同源路徑，不能再加 `/cam1/api/records/` 前綴；未完成時為 null。錯誤格式為 `{error:{code,message}}`。
+
+## 人物提示與事件回放
+
+在「即時影像」開啟各攝影機的「人物偵測」。畫面連續兩次辨識到人物後，會顯示提示並在下方「人物事件」清單記下攝影機、時間及人數。模型只辨識人物出現，不辨識身分或判斷移動方向。連續三次未見人物才重新待命，通知至少間隔 15 秒；一般每次辨識完成後間隔 1 秒再取樣，短暫經過仍可能漏報。
+
+點「回看 ±10 秒」會定位事件前後各 10 秒，自動播放並在片段結束時停止；跨檔案／午夜會依序播放可用段落。API 以 MP4 `mvhd` 的實際長度限制範圍，不以最近的任意檔案代替缺失錄影。僅部分範圍可用時會明確提示；目前小時 MP4 須完成封存後才能回放，等待中的事件每 15 秒重新檢查。中斷且兩分鐘未更新的未完成錄影不會永久顯示為寫入中。
+
+- 偵測僅在此頁可見、即時影像正在播放且開關啟用時運作；暫停、切到歷史頁、登出或關閉頁面會停止／暫停偵測。歷史回放不會產生人物事件。
+- 事件依登入帳號保存在目前瀏覽器的 localStorage，最多 200 筆；重整後可查看，不跨裝置同步。清除瀏覽器資料也會清除事件；瀏覽器禁止儲存時會顯示警示。
+- 使用延遲載入的 TensorFlow.js / COCO-SSD `lite_mobilenet_v2`。影格在瀏覽器內辨識，不上傳影像；首次啟用需從 `storage.googleapis.com/tfjs-models/` 下載模型權重。模型下載或瀏覽器運算失敗時可單獨重試，不影響影像播放器。
+- 多台攝影機共用模型並依序運算。模型準確度受光線、遮擋、人物大小與裝置速度影響；此功能是監控輔助。
+
+### 事件時間與 recorder 更新
+
+新錄影使用 `YYYY-MM-DD_HH-MM-SS_UUID.mp4`，HLS 包含 `EXT-X-PROGRAM-DATE-TIME`。本 repo 的 `stream.js` 與 Deployment 的 `CamPlatform/FFMPEG/files/record.sh` 均加入 `program_date_time`；沿用 recorder 已有的時鐘對齊、UUID 檔名與跨日資料夾維護。舊的範例 patch 已整合並移除，正式 recorder 仍由既有 GitOps 流程管理。
+
+前端優先使用 HLS 的影像時間（hls.js `playingDate` 或原生 `getStartDate`）；缺少時間標記時以目前時間扣除播放器落後量估算，介面會註明。舊小時檔名只知道小時，起錄不在整點或中途重啟時會有偏差，回放也會註明為估算值。秒級檔名仍可能有緩衝或關鍵影格的時間偏移；部署後應以實際攝影機事件核對。自訂檔名只有檔案修改時間時，不用於事件定位。
+
+模型 API 參考 [COCO-SSD 官方文件](https://github.com/tensorflow/tfjs-models/blob/master/coco-ssd/README.md)；串流時間標記參考 [FFmpeg HLS 文件](https://ffmpeg.org/ffmpeg-formats.html#hls-2)。
+
+## 驗證設定
+
+完整範例在 [.env.example](.env.example)。必要值是 `JWT_SECRET`（至少 32 bytes）、`AUTH_USERNAME`、`AUTH_PASSWORD_HASH`。不提供可登入的預設帳密。
+
+- JWT：固定 HS256、issuer/audience/subject/expiry/session 驗證，預設 1 小時，可設 `TOKEN_TTL_SECONDS`（1–86400 秒）。
+- 正式環境必須設定 `NODE_ENV=production`、`COOKIE_SECURE=true`、HTTPS 的 `PUBLIC_ORIGIN`；登入／登出檢查 Origin，登入只接受 JSON。Cookie 為 HttpOnly、SameSite=Strict、Path=/，不設 Domain。
+- 影片與 API 送出 `Cache-Control: private, no-store`。Ingress/CDN 不得覆寫成公共快取。
+- 登入限制預設同一連線來源 60 秒內 20 次，可設定 `LOGIN_RATE_LIMIT_MAX` / `LOGIN_RATE_LIMIT_WINDOW_SECONDS`。不信任任意 `X-Forwarded-For`；Ingress 後面會共用實際代理來源的額度。
+- JWT session allowlist 存在記憶體，採 **單副本 + Recreate**。登出即撤銷這顆 token，重啟、部署、密鑰輪替後需重新登入。若要多副本，必須先加入共用 session store。
+- 此版本提供單一管理帳號；多使用者／攝影機分權尚未實作。
+
+## Docker、CI/CD 與正式部署
+
+正式部署由旁邊的 **Deployment repo** 管理：
+
+- `CamPlatform/charts/cam-platform-server`：沿用既有 `ffmpeg/camplatform-server` 與 server Application，固定 slave02，唯讀掛載既有 `nfs-data-pvc` 至 `/data`。
+- `CamPlatform/charts/cam-platform-app`：Vue / Nginx 與 Ingress；`/api`、`/cam1`、`/cam2` 全部走 JWT backend。
+- `CamPlatform/environments/prod/{frontend,server}-values.yml`：前後端同一 Git SHA。
+- `argocd-apps/prod-cam-platform-{frontend,server}.yml`：Argo CD 自動同步；server PreSync 檢查 Secret／設定與錄影目錄，前端 PreSync 檢查後端 readiness 與無 token 的 401。不建立另一個 backend Application 搶管相同資源。
+
+部署使用既有 recorder PVC；它在 Deployment 設定為 slave02 的 NFS export，對應使用者既有 `/data/cam1`。上線前要實際確認 PVC 根目錄就是 cam1/cam2；本機無叢集 context 時不能假設已讀到遠端影片。
+
+PR 與 main 先執行 `npm test`、`npm run build` 及前後端 Docker build；main 兩個 image 都成功發布後，才在一個 Deployment commit 更新兩個 tags。只發布完整 SHA，不再發布 `latest`。GitHub repository 需設定：
+
+- `DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`：可發布 `hackdog30678/camplatform-server` / `camplatform-frontend`。
+- `DEPLOY_REPO_TOKEN`：可更新 `hackdog33456/Deployment` 的 main。
+
+Kubernetes `ffmpeg` namespace 需有 `dockerhub-secret`、`camplatform-auth`：
 
 ```powershell
-$env:VIDEO_ROOT = 'D:\camera-recordings'
-npm run server
-# 另一個終端執行 npm run dev
+npm run auth:secret -- --env-file .env --output camplatform-auth.secret.json
+kubectl -n ffmpeg apply -f camplatform-auth.secret.json
+Remove-Item -LiteralPath ./camplatform-auth.secret.json
 ```
 
-`VIDEO_ROOT` 同時作為 HLS 和錄影的根目錄。正式部署建議以唯讀方式掛載 PVC；歷史 API 不會修改或刪除錄影，也不跟隨攝影機、日期或影片的符號連結。
+helper 只將 `JWT_SECRET`、`AUTH_USERNAME`、`AUTH_PASSWORD_HASH` 寫入 Secret；正式 cookie、origin、儲存設定由 chart 提供。不要提交 `.env` 或 `*.secret.json`。更換 Secret 後要 restart 後端。
 
-此功能需要同時更新 frontend 與 server image。CI 會在兩個 image 建置成功後，一起更新 Deployment repo 的前、後端 Argo CD tag；server chart 保留既有 Service 與 PVC，以唯讀方式提供錄影。Ingress 已有 `/cam1`、`/cam2` prefix，不需要新增路由。
+**首次上線依 Deployment/CamPlatform/README.md 的遷移順序執行**：先備好 Secret/PVC/registry，確認舊 LoadBalancer／Ingress 等旁路不會繞過登入，再更新既有 server chart。更新 chart 時保留目前已發布 tag，CI 在兩個新 image 都發布成功後才一起換成新 SHA。server PreSync 若找不到 Secret、設定無效或讀不到目錄，會在更換目前 server 前失敗；待補齊設定後重新完整同步即可。前端需等 JWT backend 檢查通過才更新。不可 selective sync 跳過 hooks。
+
+舊 `k8s/deployment.yaml`、Deployment 的 `StreamServer/deployment.yaml` 已退役，不再建立空 PVC 或拉未驗證的 latest。若先前真的套用了原始碼 repo 的 `camplatform` namespace，需先盤點該 namespace 的工作負載、外部入口和 PVC：先停掉舊 server / 外部入口並保留錄影 PVC，再由正式 `ffmpeg` GitOps 管理。不要刪除 PVC/PV，也不要使用 `rollout undo` 回到無驗證 image。
+
+`stream.js` 只作本地 RTSP→HLS producer，需 `RTSP_URL`，不再提供 HTTP 靜態影片服務；正式錄影繼續由既有 Deployment/FFMPEG chart 管理。正式 host 必須使用 HTTPS，Cloudflare/Ingress 不得快取受保護路徑。
+
+## 檢查
 
 ```powershell
 npm test
 npm run build
+npm audit
+docker build -f Dockerfile.server -t camplatform-server:local .
+docker build -f Dockerfile.frontend -t camplatform-frontend:local .
 ```
 
-## Docker Hub 與 Argo CD
+API tests 使用暫存影片 fixtures，涵蓋 token、Cookie、來源、限流、登出／過期、日期／分頁、MP4 完成狀態、Range、路徑穿越及 symlink。Windows 缺少建立 file symlink 權限時只略過該測項，Linux CI 會執行。實際 slave02 錄影與外部入口請依 Deployment README 的正式 smoke checks 驗證。
 
-推送到 `main` 後，GitHub Actions 會使用 `DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN` 建置並推送：
-
-- `hackdog30678/camplatform-server:<git-sha>`
-- `hackdog30678/camplatform-frontend:<git-sha>`
-
-Workflow 先執行後端測試與前端正式建置，兩個 image 都推送成功後，使用 `DEPLOY_REPO_TOKEN` 在同一次 commit 將完整 Git SHA 回寫到 `Deployment/CamPlatform/environments/prod/frontend-values.yml` 與 `server-values.yml`。Argo CD 偵測到 tag 變更後會分別自動 rollout 前、後端；`latest` 僅為相容舊用途，正式部署使用完整 SHA。
-
-## 安全界線
-
-純前端登入只能隱藏 UI：帳密與登入狀態都可由使用者在瀏覽器內檢視或繞過，也不會保護直接存取的串流 URL。若攝影機影像需要真正的存取控制，必須對整個 hostname 使用 Cloudflare Access、Ingress authentication 或其他伺服器端驗證。
+JWT 實作使用 [jose](https://github.com/panva/jose)；token 驗證 API 參考 [jwtVerify](https://github.com/panva/jose/blob/main/docs/jwt/verify/functions/jwtVerify.md)。

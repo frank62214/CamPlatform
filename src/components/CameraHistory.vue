@@ -1,23 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import CameraView from './CameraView.vue'
+import { apiRequest, errorMessage, type HistoryRecord, type RecordingPage } from '../api'
 
-interface HistoryRecord {
-  id: string
-  fileName: string
-  date: string
-  time: string | null
-  timePrecision?: 'hour' | 'minute' | 'second' | null
-  size: number
-  status: 'ready' | 'recording' | 'unavailable'
-  fileUrl: string | null
-}
-interface HistoryResponse {
-  camera: string
-  date: string | null
-  dates: string[]
-  records: HistoryRecord[]
-}
-
+const PAGE_SIZE = 20
 const props = defineProps<{ camera: string; title: string }>()
 const dates = ref<string[]>([])
 const selectedDate = ref('')
@@ -25,41 +11,56 @@ const records = ref<HistoryRecord[]>([])
 const selected = ref<HistoryRecord | null>(null)
 const loading = ref(false)
 const error = ref('')
-const playbackError = ref(false)
-const player = ref<HTMLVideoElement | null>(null)
+const playOnLoad = ref(false)
+const player = ref<InstanceType<typeof CameraView> | null>(null)
+const total = ref(0)
+const offset = ref(0)
 const playableCount = computed(() => records.value.filter(record => record.status === 'ready').length)
 let request: AbortController | undefined
+let initialized = false
 
-async function fetchHistory(date = selectedDate.value) {
+async function fetchHistory(date = selectedDate.value, pageOffset = 0) {
   request?.abort()
   const controller = new AbortController()
   request = controller
   loading.value = true
   error.value = ''
   const previousId = selected.value?.id
-  if (date !== selected.value?.date) selected.value = null
+  selected.value = null
+  playOnLoad.value = false
   const timeout = window.setTimeout(() => controller.abort(), 20_000)
   try {
-    const response = await fetch(`/${props.camera}/api/records${date ? `?date=${encodeURIComponent(date)}` : ''}`, {
-      signal: controller.signal,
-      cache: 'no-store',
-    })
-    if (!response.ok) throw new Error('無法載入歷史錄影，請稍後重試。')
-    const data: HistoryResponse = await response.json()
-    if (!Array.isArray(data.records) || !Array.isArray(data.dates)) throw new Error('錄影服務回應格式不正確。')
-    if (request !== controller) return
-    dates.value = data.dates
-    selectedDate.value = data.date || ''
+    const base = `/api/cameras/${encodeURIComponent(props.camera)}`
+    const available = await apiRequest<{ dates: string[] }>(`${base}/dates`, { signal: controller.signal })
+    if (request !== controller || controller.signal.aborted) return
+    dates.value = available.dates
+    // Initially read only the latest nonempty day; all-date scanning is explicit.
+    if (!initialized) date = date || available.dates[0] || ''
+    selectedDate.value = date
+    if (!date && available.dates.length === 0) {
+      records.value = []
+      total.value = 0
+      offset.value = 0
+      initialized = true
+      return
+    }
+    const query = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(pageOffset) })
+    if (date) query.set('date', date)
+    const data = await apiRequest<RecordingPage>(`${base}/records?${query}`, { signal: controller.signal })
+    if (request !== controller || controller.signal.aborted) return
     records.value = data.records
-    selected.value = data.records.find(record => record.id === previousId && record.status === 'ready')
-      || data.records.find(record => record.status === 'ready') || null
-    playbackError.value = false
+    total.value = data.total
+    offset.value = data.offset
+    selected.value = data.records.find(record => record.id === previousId && record.status === 'ready' && record.fileUrl)
+      || data.records.find(record => record.status === 'ready' && record.fileUrl) || null
+    initialized = true
   } catch (reason) {
     if (request !== controller) return
     records.value = []
+    total.value = 0
     selected.value = null
     error.value = controller.signal.aborted ? '讀取錄影逾時，請重新整理。'
-      : reason instanceof Error ? reason.message : '無法載入歷史錄影，請稍後重試。'
+      : errorMessage(reason, '無法載入歷史錄影，請稍後重試。')
   } finally {
     window.clearTimeout(timeout)
     if (request === controller) loading.value = false
@@ -67,11 +68,11 @@ async function fetchHistory(date = selectedDate.value) {
 }
 
 async function selectRecord(record: HistoryRecord) {
+  if (record.status !== 'ready' || !record.fileUrl) return
+  playOnLoad.value = true
   selected.value = record
-  playbackError.value = false
   await nextTick()
-  // Some browsers require a second gesture on the native play control.
-  await player.value?.play().catch(() => {})
+  if (selected.value?.id === record.id) await player.value?.play()
 }
 
 function formatSize(bytes: number) {
@@ -110,6 +111,7 @@ onBeforeUnmount(() => {
       <label :for="`${camera}-date`">錄影日期</label>
       <select :id="`${camera}-date`" v-model="selectedDate" :disabled="loading || dates.length === 0" @change="fetchHistory()">
         <option v-if="dates.length === 0" value="">尚無可用日期</option>
+        <option v-else value="">全部日期</option>
         <option v-if="selectedDate && !dates.includes(selectedDate)" :value="selectedDate">{{ selectedDate }}</option>
         <option v-for="date in dates" :key="date" :value="date">{{ date }}</option>
       </select>
@@ -122,15 +124,12 @@ onBeforeUnmount(() => {
     <div v-else-if="loading" class="history-message" role="status">正在讀取錄影列表…</div>
     <template v-else>
       <div v-if="selected?.fileUrl" class="playback">
-        <video ref="player" :key="selected.id" :src="selected.fileUrl" :aria-label="`${title}錄影播放器`"
-          controls playsinline preload="metadata" @error="playbackError = true"></video>
+        <CameraView ref="player" :key="selected.id" :title="`${title} ${timeLabel(selected)}`" :video-url="selected.fileUrl"
+          kind="recording" compact :play-on-load="playOnLoad" />
         <div class="playback-caption">
           <span>{{ selected.date }} · {{ timeLabel(selected) }}</span>
           <a :href="selected.fileUrl" :download="selected.fileName">下載錄影</a>
         </div>
-        <p v-if="playbackError" class="playback-error" role="alert">
-          無法播放此錄影，檔案可能已被清理或瀏覽器不支援影片格式。請重新整理，或下載後播放。
-        </p>
       </div>
       <div v-else class="history-message player-placeholder">
         <strong>{{ records.length ? '尚無可播放的片段' : selectedDate ? '這天沒有歷史錄影' : '尚無歷史錄影' }}</strong>
@@ -138,12 +137,12 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="record-summary" aria-live="polite">
-        <span>錄影片段</span><span>{{ playableCount }} 段可播放 / 共 {{ records.length }} 段</span>
+        <span>錄影片段</span><span>本頁 {{ playableCount }} 段可播放 / 共 {{ total }} 段</span>
       </div>
       <ul v-if="records.length" class="record-list" :aria-label="`${title}錄影片段`">
         <li v-for="record in records" :key="record.id">
           <button type="button" class="record-button" :class="{ 'is-selected': selected?.id === record.id }"
-            :disabled="record.status !== 'ready'" :aria-pressed="selected?.id === record.id" @click="selectRecord(record)">
+            :disabled="record.status !== 'ready' || !record.fileUrl" :aria-pressed="selected?.id === record.id" @click="selectRecord(record)">
             <span class="record-details"><strong>{{ timeLabel(record) }}</strong>
               <span class="record-file">{{ record.fileName }} · {{ formatSize(record.size) }}</span></span>
             <span class="record-status" :class="`record-status--${record.status}`">
@@ -152,6 +151,13 @@ onBeforeUnmount(() => {
           </button>
         </li>
       </ul>
+      <nav v-if="total > PAGE_SIZE" class="history-pagination" :aria-label="`${title} 錄影分頁`">
+        <button type="button" class="refresh-button" :disabled="offset === 0"
+          @click="fetchHistory(selectedDate, Math.max(0, offset - PAGE_SIZE))">上一頁</button>
+        <span>{{ offset + 1 }}–{{ offset + records.length }} / {{ total }}</span>
+        <button type="button" class="refresh-button" :disabled="offset + PAGE_SIZE >= total"
+          @click="fetchHistory(selectedDate, offset + PAGE_SIZE)">下一頁</button>
+      </nav>
       <p v-if="records.some(record => record.status !== 'ready')" class="record-note">
         錄製中或未完成的檔案暫時無法播放。
       </p>
@@ -169,7 +175,7 @@ onBeforeUnmount(() => {
 .date-filter { display: flex; align-items: center; gap: 0.8rem; margin-bottom: 1rem; font-size: 0.85rem; }
 .date-filter label { flex-shrink: 0; color: #5c6c80; }
 .date-filter select { flex: 1; min-width: 0; border: 1px solid #ccd9e2; border-radius: 0.4rem; padding: 0.55rem; background: #f8fafc; color: #243a50; }
-.playback video { display: block; width: 100%; aspect-ratio: 16 / 9; background: #081727; border-radius: 0.5rem; }
+.playback :deep(video) { display: block; width: 100%; aspect-ratio: 16 / 9; background: #081727; border-radius: 0.5rem; }
 .playback-caption { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; justify-content: space-between; margin-top: 0.65rem; font-size: 0.78rem; color: #55697d; }
 .playback-caption a { color: #086b73; font-weight: 600; }
 .history-message { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.7rem; min-height: 12rem; padding: 1.5rem; text-align: center; font-size: 0.88rem; background: #f4f7fa; border-radius: 0.5rem; color: #5c6c80; }
@@ -191,13 +197,13 @@ onBeforeUnmount(() => {
 .record-status--recording { color: #91611a; }
 .record-status--unavailable { color: #697988; }
 .record-note { font-size: 0.74rem; color: #697988; margin: 0.85rem 0 0; }
-.playback-error { color: #9b3e30; font-size: 0.8rem; margin: 0.75rem 0 0; }
+.history-pagination { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.8rem; font-size: 0.8rem; color: #61768a; }
 button:focus-visible, select:focus-visible, a:focus-visible { outline: 3px solid #55b6c0; outline-offset: 2px; }
 
 @media (min-width: 992px) and (min-height: 820px) {
   .history-card { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   .history-card > :not(.record-list) { flex-shrink: 0; }
-  .playback video:not(:fullscreen), .player-placeholder { max-height: max(12rem, calc(100dvh - 42rem)); object-fit: contain; }
+  .playback :deep(video:not(:fullscreen)), .player-placeholder { max-height: max(12rem, calc(100dvh - 44rem)); object-fit: contain; }
   .record-list { flex: 1 1 0; min-height: 4rem; max-height: none; overscroll-behavior-y: contain; scrollbar-gutter: stable; }
 }
 

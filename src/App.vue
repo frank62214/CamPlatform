@@ -1,42 +1,147 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 
 import CameraTabs from './components/CameraTabs.vue'
 import LoginView from './components/LoginView.vue'
 import SentinelLogo from './components/SentinelLogo.vue'
+import { ApiError, apiRequest, setUnauthorizedHandler, type Session } from './api'
 
-const AUTH_SESSION_KEY = 'sentinel-authenticated'
-const isAuthenticated = ref(sessionStorage.getItem(AUTH_SESSION_KEY) === 'true')
+const session = ref<Session | null>(null)
+const checkingSession = ref(true)
+const notice = ref('')
+const loggingOut = ref(false)
+const logoutFailed = ref(false)
+let expiryTimer: ReturnType<typeof setTimeout> | undefined
+let authRevision = 0
+const controller = new AbortController()
 
-function handleAuthenticated() {
-  sessionStorage.setItem(AUTH_SESSION_KEY, 'true')
-  isAuthenticated.value = true
+function clearExpiryTimer() {
+  if (expiryTimer) clearTimeout(expiryTimer)
+  expiryTimer = undefined
 }
 
-function handleLogout() {
-  sessionStorage.removeItem(AUTH_SESSION_KEY)
-  isAuthenticated.value = false
+function expireSession() {
+  authRevision++
+  clearExpiryTimer()
+  session.value = null
+  notice.value = '登入已失效，請重新登入。'
 }
+
+function handleAuthenticated(value: Session) {
+  authRevision++
+  clearExpiryTimer()
+  const expires = typeof value.expiresAt === 'number'
+    ? value.expiresAt * (value.expiresAt < 1e12 ? 1000 : 1)
+    : Date.parse(value.expiresAt)
+  const remaining = expires - Date.now()
+  if (!Number.isFinite(remaining) || remaining <= 0) {
+    expireSession()
+    return
+  }
+  // Retain only session metadata. The JWT remains in the HttpOnly cookie.
+  session.value = { user: value.user, expiresAt: value.expiresAt }
+  notice.value = ''
+  expiryTimer = setTimeout(() => {
+    if (Date.now() >= expires) expireSession()
+    else handleAuthenticated(value)
+  }, Math.min(remaining, 2_147_483_647))
+}
+
+async function restoreSession() {
+  const revision = authRevision
+  try {
+    const result = await apiRequest<Session>('/api/auth/me', { signal: controller.signal }, false)
+    if (revision === authRevision && !loggingOut.value && !logoutFailed.value) handleAuthenticated(result)
+  } catch (error) {
+    if (revision !== authRevision) return
+    if (error instanceof ApiError && error.status === 401) {
+      if (session.value) expireSession()
+    } else if (checkingSession.value && !controller.signal.aborted) {
+      notice.value = '無法確認登入狀態，請確認連線後重新登入。'
+    }
+  } finally {
+    checkingSession.value = false
+  }
+}
+
+async function handleLogout() {
+  if (loggingOut.value) return
+  authRevision++
+  clearExpiryTimer()
+  session.value = null
+  loggingOut.value = true
+  logoutFailed.value = false
+  notice.value = '正在登出…'
+  try {
+    await apiRequest<void>('/api/auth/logout', { method: 'POST' }, false)
+    notice.value = '已登出監控中心。'
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      notice.value = '已登出監控中心。'
+    } else {
+      logoutFailed.value = true
+      notice.value = '無法完成伺服器登出，請確認連線後重試。'
+    }
+  } finally {
+    loggingOut.value = false
+  }
+}
+
+function handleVisibility() {
+  if (document.visibilityState === 'visible' && session.value) void restoreSession()
+}
+
+setUnauthorizedHandler(() => {
+  if (session.value) expireSession()
+})
+
+onMounted(() => {
+  document.addEventListener('visibilitychange', handleVisibility)
+  void restoreSession()
+})
+
+onBeforeUnmount(() => {
+  clearExpiryTimer()
+  controller.abort()
+  setUnauthorizedHandler()
+  document.removeEventListener('visibilitychange', handleVisibility)
+})
 </script>
 
 <template>
-  <LoginView v-if="!isAuthenticated" @authenticated="handleAuthenticated" />
+  <main v-if="checkingSession" class="session-loading" role="status">正在確認登入狀態…</main>
+  <LoginView
+    v-else-if="!session"
+    :notice="notice"
+    :disabled="loggingOut || logoutFailed"
+    :logout-failed="logoutFailed"
+    @authenticated="handleAuthenticated"
+    @retry-logout="handleLogout"
+  />
 
   <div v-else class="monitor-shell">
     <header class="monitor-header">
       <SentinelLogo compact />
       <div class="monitor-header__actions">
-        <span>攝影機監控</span>
+        <span>{{ session.user.username }} · 攝影機監控</span>
         <button type="button" @click="handleLogout">登出</button>
       </div>
     </header>
     <main class="monitor-main">
-      <CameraTabs />
+      <CameraTabs :account="session.user.username" />
     </main>
   </div>
 </template>
 
 <style scoped>
+.session-loading {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  color: #e4edf5;
+  background: #091727;
+}
+
 .monitor-shell {
   min-height: 100vh;
   background: #f4f7fb;

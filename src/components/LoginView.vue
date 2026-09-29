@@ -2,19 +2,25 @@
 import { nextTick, onMounted, ref } from 'vue'
 
 import SentinelLogo from './SentinelLogo.vue'
+import { ApiError, apiRequest, errorMessage as getErrorMessage, type Session } from '../api'
 
-const emit = defineEmits<{
-  authenticated: []
+const props = defineProps<{
+  notice?: string
+  disabled?: boolean
+  logoutFailed?: boolean
 }>()
 
-const VALID_USERNAME = 'admin'
-const VALID_PASSWORD = '!Taico12345'
+const emit = defineEmits<{
+  authenticated: [session: Session]
+  retryLogout: []
+}>()
 
 const username = ref('')
 const password = ref('')
 const showPassword = ref(false)
 const errorMessage = ref('')
 const usernameInput = ref<HTMLInputElement | null>(null)
+const submitting = ref(false)
 
 onMounted(() => {
   usernameInput.value?.focus()
@@ -27,17 +33,30 @@ function clearError() {
 }
 
 async function handleSubmit() {
-  if (username.value === VALID_USERNAME && password.value === VALID_PASSWORD) {
-    password.value = ''
-    errorMessage.value = ''
-    emit('authenticated')
+  if (submitting.value || props.disabled) return
+  if (!username.value.trim() || !password.value) {
+    errorMessage.value = '請輸入帳號與密碼。'
     return
   }
-
-  errorMessage.value = '帳號或密碼不正確，請再試一次。'
-  password.value = ''
-  await nextTick()
-  usernameInput.value?.focus()
+  submitting.value = true
+  errorMessage.value = ''
+  try {
+    const { user, expiresAt } = await apiRequest<Session>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username: username.value.trim(), password: password.value }),
+    }, false)
+    password.value = ''
+    emit('authenticated', { user, expiresAt })
+  } catch (error) {
+    errorMessage.value = error instanceof ApiError && error.status === 401
+      ? '帳號或密碼不正確，請再試一次。'
+      : getErrorMessage(error, '無法登入，請確認連線後再試一次。')
+    password.value = ''
+    await nextTick()
+    usernameInput.value?.focus()
+  } finally {
+    submitting.value = false
+  }
 }
 </script>
 
@@ -59,6 +78,8 @@ async function handleSubmit() {
         </div>
 
         <form class="login-form" novalidate @submit.prevent="handleSubmit">
+          <p v-if="notice" class="login-notice" role="status">{{ notice }}</p>
+          <button v-if="logoutFailed" type="button" class="logout-retry" @click="emit('retryLogout')">重試登出</button>
           <div class="field-group">
             <label for="username">帳號</label>
             <input
@@ -70,6 +91,7 @@ async function handleSubmit() {
               autocomplete="username"
               placeholder="輸入帳號"
               required
+              :disabled="disabled || submitting"
               autofocus
               :aria-invalid="Boolean(errorMessage)"
               :aria-describedby="errorMessage ? 'login-error' : undefined"
@@ -88,6 +110,7 @@ async function handleSubmit() {
                 autocomplete="current-password"
                 placeholder="輸入密碼"
                 required
+                :disabled="disabled || submitting"
                 :aria-invalid="Boolean(errorMessage)"
                 :aria-describedby="errorMessage ? 'login-error' : undefined"
                 @input="clearError"
@@ -114,12 +137,14 @@ async function handleSubmit() {
             {{ errorMessage }}
           </p>
 
-          <button class="login-submit" type="submit">進入監控中心</button>
+          <button class="login-submit" type="submit" :disabled="disabled || submitting">
+            {{ submitting ? '正在登入…' : '進入監控中心' }}
+          </button>
         </form>
 
         <div class="login-capabilities">
           <span aria-hidden="true"></span>
-          <p>兩路攝影機 · 即時串流 · 錄影回放</p>
+          <p>攝影機監控 · 即時串流 · 錄影回放</p>
         </div>
       </div>
     </section>
@@ -127,6 +152,28 @@ async function handleSubmit() {
 </template>
 
 <style scoped>
+.login-notice {
+  margin-bottom: 1rem;
+  color: #a9d7e0;
+  font-size: 0.92rem;
+}
+
+.logout-retry {
+  margin-bottom: 1rem;
+  padding: 0.5rem 1rem;
+  border: 1px solid #31d5d8;
+  border-radius: 0.4rem;
+  color: #8ff9f7;
+  background: transparent;
+}
+
+.login-submit:disabled,
+.field-group input:disabled {
+  cursor: wait;
+  opacity: 0.6;
+  transform: none;
+}
+
 .login-shell {
   --sentinel-bg: #071321;
   --sentinel-panel: #0a1728;

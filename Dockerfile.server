@@ -7,11 +7,14 @@ WORKDIR /app
 COPY package*.json ./
 
 # 安裝生產依賴
-RUN npm ci --only=production
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 # 複製後端相關文件
 COPY server.js ./
-COPY server ./server
+COPY backend ./backend
+
+ENV NODE_ENV=production
+USER node
 
 # 暴露端口
 EXPOSE 3000
