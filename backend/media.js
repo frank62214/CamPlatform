@@ -1,18 +1,22 @@
 import { constants } from 'node:fs';
-import { lstat, open, readdir, realpath } from 'node:fs/promises';
+import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { HttpError } from './errors.js';
 import { isRecordingActive, readMp4Metadata, recordingTime } from './event-clips.js';
 
 const notFound = () => new HttpError(404, 'NOT_FOUND', 'Media not found');
 const isMissing = (error) => ['ENOENT', 'ENOTDIR', 'ELOOP'].includes(error.code);
+const isPermissionDenied = (error) => ['EACCES', 'EPERM'].includes(error.code);
+const isUnavailableEntry = (error, filename, opened = false) => isMissing(error) || error.status === 404 ||
+  (isPermissionDenied(error) && (error.path ? path.resolve(error.path) === filename : opened));
 const validName = (name) => typeof name === 'string' && /^[A-Za-z0-9][A-Za-z0-9_. -]{0,199}$/.test(name) && !name.includes('..');
 export function validDate(value) {
   return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) &&
     !Number.isNaN(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
 }
 
-export function createMedia(config) {
+export function createMedia(config, filesystem = fs) {
+  const { lstat, open, readdir, realpath } = filesystem;
   const completeCache = new Map();
 
   function camera(id) {
@@ -36,17 +40,36 @@ export function createMedia(config) {
   async function dates(id) {
     const directory = await cameraDirectory(id);
     const result = [];
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      if (!entry.isDirectory() || !validDate(entry.name)) continue;
+    for (const day of await readdir(directory)) {
+      if (!validDate(day)) continue;
       try {
-        const files = await readdir(await safePath([id, entry.name]), { withFileTypes: true });
         // Tomorrow's precreated folder must not hide today's recordings.
-        if (files.some((file) => file.isFile() && validName(file.name) && /\.mp4$/i.test(file.name))) result.push(entry.name);
+        if ((await recordingEntries(id, day)).length) result.push(day);
       } catch (error) {
         if (!isMissing(error) && error.status !== 404) throw error;
       }
     }
     return result.sort().reverse();
+  }
+
+  async function recordingEntries(id, day) {
+    const directory = await safePath([id, day]);
+    // On NFS, withFileTypes can internally lstat every entry and fail the entire
+    // listing if one actively written file denies metadata access. Filter names
+    // first, then isolate individual files; directory access errors still surface.
+    const names = await readdir(directory);
+    const recordings = [];
+    for (const name of names) {
+      if (!validName(name) || !/\.mp4$/i.test(name)) continue;
+      const filename = path.join(directory, name);
+      try {
+        // Do not follow symlinks or open nonregular files such as named pipes.
+        if ((await lstat(filename)).isFile()) recordings.push({ name, filename });
+      } catch (error) {
+        if (!isUnavailableEntry(error, filename)) throw error;
+      }
+    }
+    return recordings;
   }
 
   async function cameraDirectory(id) {
@@ -63,8 +86,9 @@ export function createMedia(config) {
 
   async function openFile(parts) {
     let handle;
+    let filename;
     try {
-      const filename = await safePath(parts);
+      filename = await safePath(parts);
       handle = await open(filename, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
       const stat = await handle.stat();
       if (!stat.isFile()) throw notFound();
@@ -72,6 +96,9 @@ export function createMedia(config) {
     } catch (error) {
       await handle?.close();
       if (isMissing(error)) throw notFound();
+      // Descriptor errors lack a path. Tag them only after safePath succeeds so
+      // callers can distinguish a file failure from denied ancestor access.
+      if (filename && !error.path && isPermissionDenied(error)) error.path = filename;
       throw error;
     }
   }
@@ -93,29 +120,28 @@ export function createMedia(config) {
     const result = [];
     for (const day of days) {
       let entries;
-      try { entries = await readdir(await safePath([id, day]), { withFileTypes: true }); }
+      try { entries = await recordingEntries(id, day); }
       catch (error) { if (isMissing(error) || error.status === 404) continue; throw error; }
-      for (const entry of entries) {
-        if (!entry.isFile() || !validName(entry.name) || !/\.mp4$/i.test(entry.name)) continue;
+      for (const { name, filename } of entries) {
         let file;
         try {
-          file = await openFile([id, day, entry.name]);
+          file = await openFile([id, day, name]);
           const details = await metadata(file);
-          const time = recordingTime(day, entry.name, config.recordingUtcOffset);
+          const time = recordingTime(day, name, config.recordingUtcOffset);
           const status = details.complete ? 'ready' : isRecordingActive(file.stat.mtimeMs) ? 'recording' : 'unavailable';
           const record = {
-            id: `${id}/${day}/${entry.name}`, name: entry.name, fileName: entry.name, date: day,
+            id: `${id}/${day}/${name}`, name, fileName: name, date: day,
             timeStamp: time?.timeStamp ?? file.stat.mtime.toISOString(), size: file.stat.size,
             time: time?.time ?? null, timePrecision: time?.timePrecision ?? null,
             updatedAt: file.stat.mtime.toISOString(), status,
-            fileUrl: details.complete ? `/${id}/api/records/${day}/${encodeURIComponent(entry.name)}` : null,
+            fileUrl: details.complete ? `/${id}/api/records/${day}/${encodeURIComponent(name)}` : null,
           };
           if (includeDetails) {
             // mtime is useful for history ordering, but is not a recording start.
             if (time) result.push({ record, ...details, ...time, modifiedMs: file.stat.mtimeMs });
           } else result.push(record);
         } catch (error) {
-          if (!isMissing(error) && error.status !== 404) throw error;
+          if (!isUnavailableEntry(error, filename, Boolean(file))) throw error;
         } finally { await file?.handle.close(); }
       }
     }
