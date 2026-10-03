@@ -22,7 +22,7 @@ export function usePersonDetection(
   const count = ref(0)
   const latest = ref<PersonObservation | null>(null)
   const gate = createPersonPresence()
-  let lease: Awaited<ReturnType<typeof acquirePersonDetector>> | null = null
+  let lease: ReturnType<typeof acquirePersonDetector> | null = null
   let timer: ReturnType<typeof setTimeout> | undefined
   let revision = 0
   let disposed = false
@@ -49,6 +49,7 @@ export function usePersonDetection(
     clearTimeout(timer)
     lease?.release()
     lease = null
+    if (canvas) { canvas.width = 0; canvas.height = 0; canvas = null }
     clearObservations(true)
     status.value = 'off'
   }
@@ -66,12 +67,14 @@ export function usePersonDetection(
     const current = revision
     status.value = 'loading'
     try {
-      const acquired = await acquirePersonDetector()
-      if (current !== revision || disposed) { acquired.release(); return }
+      const acquired = acquirePersonDetector()
       lease = acquired
+      await acquired.ready
+      if (current !== revision || disposed) return
       status.value = 'waiting'
       const tick = async () => {
         if (current !== revision || disposed) return
+        const startedAt = performance.now()
         const element = video.value
         if (document.hidden || !element || element.paused || element.ended || element.seeking ||
           element.readyState < 2 || !element.videoWidth || !element.videoHeight || element.currentTime === lastFrame) {
@@ -83,14 +86,18 @@ export function usePersonDetection(
             !document.hidden && !element.paused && !element.seeking && element.readyState >= 2
           try {
             canvas ??= document.createElement('canvas')
-            const scale = Math.min(1, 640 / element.videoWidth)
-            canvas.width = Math.round(element.videoWidth * scale)
-            canvas.height = Math.round(element.videoHeight * scale)
-            const context = canvas.getContext('2d')
+            // Keep the main-thread snapshot small; model loading and inference run in the worker.
+            const scale = Math.min(1, 320 / Math.max(element.videoWidth, element.videoHeight))
+            const width = Math.max(1, Math.round(element.videoWidth * scale))
+            const height = Math.max(1, Math.round(element.videoHeight * scale))
+            if (canvas.width !== width) canvas.width = width
+            if (canvas.height !== height) canvas.height = height
+            const context = canvas.getContext('2d', { willReadFrequently: true })
             if (!context) throw new Error('Canvas is unavailable')
             const clock = frameTime()
             context.drawImage(element, 0, 0, canvas.width, canvas.height)
-            const predictions = await acquired.detect(canvas, valid)
+            const frame = context.getImageData(0, 0, width, height)
+            const predictions = await acquired.detect(frame, valid)
             if (valid()) {
               const state = gate.update(predictions, performance.now())
               status.value = 'watching'
@@ -114,11 +121,16 @@ export function usePersonDetection(
             }
           }
         }
-        if (current === revision && !disposed) timer = setTimeout(() => void tick(), 1000)
+        // Slower devices get a longer rest between frames instead of continuously consuming CPU.
+        const delay = Math.max(1000, Math.min(5000, performance.now() - startedAt))
+        if (current === revision && !disposed) timer = setTimeout(() => void tick(), delay)
       }
       void tick()
     } catch {
-      if (current === revision && !disposed) status.value = 'error'
+      if (current === revision && !disposed) {
+        stop()
+        status.value = 'error'
+      }
     }
   }
 
