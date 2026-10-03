@@ -21,7 +21,7 @@ function validCheckpoint(value) {
 function validEvent(value) {
   return object(value) && typeof value.id === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value.id) && cameraId(value.cameraId) &&
     typeof value.cameraName === 'string' && value.cameraName.length > 0 && value.cameraName.length <= 200 &&
-    instant(value.occurredAt) && instant(value.recordedAt) && value.timing === 'stream' &&
+    instant(value.occurredAt) && instant(value.recordedAt) && ['stream', 'estimated'].includes(value.timing) &&
     Number.isInteger(value.count) && value.count > 0 && value.count <= 100 &&
     Number.isFinite(value.score) && value.score >= 0.6 && value.score <= 1;
 }

@@ -48,6 +48,40 @@ test('runtime starts without any HTTP clients and confirmed event preserves firs
   assert.equal(service.status().cameras[0].lastEventAt, event.occurredAt);
 });
 
+test('either estimated confirmation frame marks the event estimated without replacing its first supplied timestamp', async (t) => {
+  for (const [firstTiming, confirmingTiming, expected] of [
+    ['stream', 'stream', 'stream'], ['estimated', 'stream', 'estimated'],
+    ['stream', 'estimated', 'estimated'], ['estimated', 'estimated', 'estimated'],
+  ]) {
+    await t.test(`${firstTiming} then ${confirmingTiming}`, async (child) => {
+      const { service, callbacks } = await fixture(child);
+      const first = { ...observation(-10), timing: firstTiming };
+      const confirming = { ...observation(-8), timing: confirmingTiming };
+      await callbacks.onObservation('cam1', first);
+      assert.equal(service.events().total, 0);
+      await callbacks.onObservation('cam1', confirming);
+      const [event] = service.events().events;
+      assert.equal(event.occurredAt, first.occurredAt);
+      assert.equal(event.timing, expected);
+      assert.equal(event.recordedAt, new Date(NOW).toISOString());
+    });
+  }
+});
+
+test('invalid timing observations cannot advance confirmation or manufacture an event clock', async (t) => {
+  const { service, callbacks } = await fixture(t);
+  for (const [index, timing] of [undefined, null, 'unknown', 'STREAM', 1].entries()) {
+    await callbacks.onObservation('cam1', { ...observation(index), timing });
+  }
+  assert.equal(service.events().total, 0);
+  assert.equal(service.status().cameras[0].lastFrameAt, null);
+  await callbacks.onObservation('cam1', { ...observation(10), timing: 'estimated' });
+  assert.equal(service.events().total, 0);
+  await callbacks.onObservation('cam1', observation(12));
+  assert.equal(service.events().events[0].occurredAt, observation(10).occurredAt);
+  assert.equal(service.events().events[0].timing, 'estimated');
+});
+
 test('duplicate/reordered frames do not confirm presence or generate repeated events', async (t) => {
   const { service, callbacks } = await fixture(t);
   await callbacks.onObservation('cam1', observation(0));
@@ -76,9 +110,9 @@ test('three negative samples end presence and the 15 second cooldown suppresses 
   assert.equal(service.events().events[0].occurredAt, observation(20).occurredAt);
 });
 
-test('restart preserves enabled settings, confirmed presence and cooldown without duplicate episode', async (t) => {
+test('restart preserves estimated event precision, enabled settings, presence and cooldown without duplicate episode', async (t) => {
   const { service, callbacks, config } = await fixture(t);
-  for (const second of [0, 2]) await callbacks.onObservation('cam1', observation(second));
+  for (const second of [0, 2]) await callbacks.onObservation('cam1', { ...observation(second), timing: 'estimated' });
   await service.setEnabled('cam2', false);
   await service.stop();
   let next;
@@ -91,6 +125,8 @@ test('restart preserves enabled settings, confirmed presence and cooldown withou
   assert.equal(next.isEnabled('cam2'), false);
   for (const second of [2, 4, 6]) await next.onObservation('cam1', observation(second));
   assert.equal(restarted.events().total, 1);
+  assert.equal(restarted.events().events[0].timing, 'estimated');
+  assert.equal(restarted.events().events[0].occurredAt, observation(0).occurredAt);
   assert.equal(restarted.status().cameras[0].present, true);
   for (const second of [8, 10, 12]) await next.onObservation('cam1', observation(second, []));
   for (const second of [13, 14]) await next.onObservation('cam1', observation(second));

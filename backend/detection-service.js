@@ -76,7 +76,7 @@ export function createDetectionService(config, { store = createEventStore(config
       const value = camera(id);
       if (!enabled(id) || revision !== value.revision) return;
       if (!await flush(value)) return;
-      if (!observation || !instant(observation.occurredAt) || observation.timing !== 'stream' ||
+      if (!observation || !instant(observation.occurredAt) || !['stream', 'estimated'].includes(observation.timing) ||
           typeof observation.frameKey !== 'string' || !observation.frameKey.length || observation.frameKey.length > 512 ||
           !Array.isArray(observation.predictions)) return;
       const time = Date.parse(observation.occurredAt);
@@ -91,7 +91,7 @@ export function createDetectionService(config, { store = createEventStore(config
       value.lastSeen = time;
       const result = value.gate.update(observation.predictions, time);
       if (!value.present && result.count > 0 && !value.candidate) {
-        value.candidate = { occurredAt: observation.occurredAt, frameKey: observation.frameKey };
+        value.candidate = { occurredAt: observation.occurredAt, frameKey: observation.frameKey, timing: observation.timing };
       } else if (!value.present && result.count === 0) value.candidate = null;
       const view = { present: result.present, count: result.count, lastFrameAt: observation.occurredAt };
       if (result.present !== value.present || result.notify) {
@@ -101,12 +101,13 @@ export function createDetectionService(config, { store = createEventStore(config
         };
         const change = { checkpoint };
         if (result.notify) {
-          const first = value.candidate ?? { occurredAt: observation.occurredAt, frameKey: observation.frameKey };
+          const first = value.candidate ?? { occurredAt: observation.occurredAt, frameKey: observation.frameKey, timing: observation.timing };
           const digest = createHash('sha256').update(`${id}\0${first.frameKey}\0${first.occurredAt}`).digest('hex');
           change.event = {
             id: `person_${digest}`, cameraId: id, cameraName: ({ cam1: '客廳', cam2: '大門' })[id] ?? id,
             occurredAt: first.occurredAt, recordedAt: new Date(now()).toISOString(),
-            count: Math.min(result.count, 100), score: result.score, timing: 'stream',
+            count: Math.min(result.count, 100), score: result.score,
+            timing: first.timing === 'estimated' || observation.timing === 'estimated' ? 'estimated' : 'stream',
           };
         }
         value.pending = { change, view };

@@ -8,6 +8,18 @@ const MAX_PLAYLIST_BYTES = 128 * 1024;
 const MAX_SEGMENT_BYTES = 16 * 1024 * 1024;
 const RGB_BYTES = 320 * 180 * 3;
 
+function parseProgramDateTime(value) {
+  // FFmpeg writes offsets such as +0800; ISO producers also use +08:00 or Z.
+  const parts = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|[+-](\d{2}):?(\d{2}))$/.exec(value);
+  if (!parts || Number(parts[2]) > 23 || Number(parts[3]) > 59 || Number(parts[4]) > 59 ||
+    (parts[6] !== 'Z' && (Number(parts[7]) > 23 || Number(parts[8]) > 59))) return null;
+  const day = Date.parse(`${parts[1]}T00:00:00Z`);
+  // Date.parse can normalize impossible dates such as February 30; reject those.
+  if (!Number.isFinite(day) || new Date(day).toISOString().slice(0, 10) !== parts[1]) return null;
+  const stamp = Date.parse(value);
+  return Number.isFinite(stamp) ? stamp : null;
+}
+
 export function parseDetectionPlaylist(text) {
   if (Buffer.byteLength(text) > MAX_PLAYLIST_BYTES || !text.startsWith('#EXTM3U')) throw new Error('Invalid HLS playlist');
   const segments = [];
@@ -17,9 +29,7 @@ export function parseDetectionPlaylist(text) {
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
     if (line.startsWith('#EXT-X-PROGRAM-DATE-TIME:')) {
-      const stamp = line.slice(25);
-      nextTime = /^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$/.test(stamp) ? Date.parse(stamp) : null;
-      if (!Number.isFinite(nextTime)) nextTime = null;
+      nextTime = parseProgramDateTime(line.slice(25));
     } else if (line.startsWith('#EXTINF:')) {
       duration = Number(line.slice(8).split(',')[0]);
       if (!Number.isFinite(duration) || duration <= 0 || duration > 30) throw new Error('Invalid HLS duration');
@@ -31,10 +41,10 @@ export function parseDetectionPlaylist(text) {
       throw new Error('Unsupported HLS media format');
     } else if (line && !line.startsWith('#')) {
       if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,150}\.ts$/.test(line) || duration === null) throw new Error('Invalid HLS segment');
-      if (!gap && nextTime !== null) {
-        const occurredAtMs = nextTime + duration * 500;
-        segments.push({ name: line, offsetSeconds: duration / 2, occurredAtMs,
-          occurredAt: new Date(occurredAtMs).toISOString(), frameKey: `${line}:${nextTime}:${duration}` });
+      if (!gap) {
+        const occurredAtMs = nextTime === null ? null : nextTime + duration * 500;
+        segments.push({ name: line, durationSeconds: duration, offsetSeconds: duration / 2, occurredAtMs,
+          occurredAt: occurredAtMs === null ? null : new Date(occurredAtMs).toISOString(), frameKey: `${line}:${nextTime}:${duration}` });
       }
       if (nextTime !== null) nextTime += duration * 1000;
       duration = null;
@@ -60,7 +70,7 @@ async function boundedRead(file, maxBytes) {
     }
     const after = await handle.stat();
     if (after.size !== stat.size || after.mtimeMs !== stat.mtimeMs) throw new Error('Media file changed');
-    return data;
+    return { bytes: data, mtimeMs: after.mtimeMs };
   } finally { await handle.close(); }
 }
 
@@ -77,10 +87,21 @@ export async function readLatestDetectionSegment(dataRoot, cameraId, nowMs = Dat
   const relative = path.relative(await realpath(root), actual);
   if (relative !== path.join(cameraId, 'hls')) throw new Error('Media escaped storage root');
   const playlist = await boundedRead(path.join(directory, 'stream.m3u8'), MAX_PLAYLIST_BYTES);
-  const segment = parseDetectionPlaylist(playlist.toString('utf8')).at(-1);
-  if (!segment || nowMs - segment.occurredAtMs > MAX_FRAME_AGE_MS || segment.occurredAtMs > nowMs + 5000) return null;
-  const bytes = await boundedRead(path.join(directory, segment.name), MAX_SEGMENT_BYTES);
-  return { ...segment, bytes };
+  const segment = parseDetectionPlaylist(playlist.bytes.toString('utf8')).at(-1);
+  if (!segment) return null;
+  const { bytes, mtimeMs } = await boundedRead(path.join(directory, segment.name), MAX_SEGMENT_BYTES);
+  const fresh = (stamp) => Number.isFinite(stamp) && nowMs - stamp <= MAX_FRAME_AGE_MS && stamp <= nowMs + 5000;
+  // A producer timestamp must never make an old local file look live. Conversely,
+  // some live producers drift their PDT clock; label the file-time estimate honestly.
+  if (!fresh(mtimeMs)) return null;
+  const timing = fresh(segment.occurredAtMs) ? 'stream' : 'estimated';
+  const occurredAtMs = timing === 'stream' ? segment.occurredAtMs
+    : mtimeMs - (segment.durationSeconds - segment.offsetSeconds) * 1000;
+  if (!fresh(occurredAtMs)) return null;
+  return { ...segment, bytes, mtimeMs, timing, occurredAtMs, occurredAt: new Date(occurredAtMs).toISOString(),
+    // Clock selection can change while a file stays unchanged. The physical
+    // sample identity must stay stable so that transition cannot confirm presence.
+    frameKey: `${segment.name}:${mtimeMs}:${bytes.length}:${segment.offsetSeconds}` };
 }
 
 export function decodeDetectionFrame(segment, { signal, timeoutMs = 10_000, spawnProcess = spawn, ffmpegPath = 'ffmpeg' } = {}) {

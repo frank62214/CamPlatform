@@ -15,11 +15,11 @@ docker build -f Dockerfile.server -t camplatform-server:verify .
 
 Windows 的環境變數寫法為 `$env:RUN_DETECTION_MODEL_SMOKE='1'`。一般 `npm test` 不強制下載模型；可選的真實模型測試需先準備權重。Windows 缺少建立檔案 symlink 權限時可略過該測項，Linux 必須執行。
 
-本次完整測試在 Windows 為 116 通過、2 個上述環境／模型前置條件略過、0 失敗；Linux server image 內執行完整測試（含真實模型與 symlink）全部通過。Vue 型別檢查、正式 build、server Docker build 與 Helm lint 均通過。
+本次完整測試在 Windows 與 Linux server image 內執行且通過；Linux 包含真實模型與 symlink 測試。Vue 型別檢查、正式 build、server Docker build 與 Helm lint 均通過。
 
 | 測試組 | 驗證事項 |
 | --- | --- |
-| `detection-runtime.test.js` | PDT／取樣時間、來源格式與路徑、檔案容量、過期／未來影格、去重、序列化、取消、逾時、重試、設定 revision 競態、離線本機模型 |
+| `detection-runtime.test.js` | PDT 的 Z／+08:00／+0800、取樣時間與檔案時間估算、來源格式與路徑、檔案容量、過期／未來影格、實體影格去重、序列化、取消、逾時、重試、設定 revision 競態、離線本機模型 |
 | `detection-store.test.js` | 原子保存、寫入失敗不發布、重試、重啟還原、筆數／天數、時區日期、損壞檔案不覆寫、實際可寫探測 |
 | `detection-service.test.js` | 無客戶端的常駐生命週期、連續樣本、首次陽性時間、冷卻、跨重啟去重、相機獨立、設定競態、儲存錯誤與狀態 |
 | `detection-api.test.js` | 未登入、跨來源、查詢與 JSON body 驗證、共享事件與持久設定 |
@@ -31,8 +31,8 @@ Windows 的環境變數寫法為 `$env:RUN_DETECTION_MODEL_SMOKE='1'`。一般 `
 
 已通過：
 
-1. 啟動 backend 後，在**零瀏覽器且尚未發出任何 HTTP 請求**時，直接從持久事件檔讀到第一筆人物事件；辨識分數約 0.689，影像時間來自 PDT。
-2. 第二支攝影機空白時不混入第一支的事件；改為人物影像後獨立產生事件。
+1. 啟動 backend 後，在**零瀏覽器且尚未發出任何 HTTP 請求**時，直接從持久事件檔讀到第一筆人物事件；辨識分數約 0.689。初次驗證使用正常 PDT，後續以實際 FFmpeg `+0800` 格式及落後一小時的 PDT 重驗，正確保存 `estimated` 事件，重啟後保留此標記。
+2. 第二支攝影機空白時不混入第一支的事件；改為人物影像後獨立產生事件，正常 `+0800` 時間來源保留為 `stream`。
 3. 停用後不新增事件；避開確認通知冷卻時間後重新啟用會恢復紀錄。
 4. 重啟 backend 後事件 ID、設定仍存在，持續留在畫面的同一出現時段不重複記錄。
 5. 停止更新 HLS 後超過 30 秒，狀態轉為等待／異常，不能保持正常監控。
@@ -52,7 +52,7 @@ Windows 的環境變數寫法為 `$env:RUN_DETECTION_MODEL_SMOKE='1'`。一般 `
 
 1. CI 的測試、兩個 build、兩個 SHA image publish 及 Deployment tag 更新都成功。
 2. 兩個 Argo Application 在同一個 Deployment revision 為 Synced / Healthy；實際 backend/frontend Pod 使用指定 SHA，Ready=1/1，observedGeneration 與 generation 相同。
-3. `/data` 為唯讀掛載、`/events` 為専用子目錄可寫掛載；事件初始化成功，不修改既有 auth Secret。
+3. 同一個 PVC volume 的 `/data` 為唯讀掛載、`/events` 為專用子目錄可寫掛載；事件初始化成功，不修改既有 auth Secret。
 4. 使用既有帳號登入確認兩支即時影像、共享事件清單、歷史回放及登出；未登入不能讀取新事件／偵測 API。
 5. 關閉驗證瀏覽器後，透過受控維運檢查確認偵測服務仍執行、最近分析時間繼續前進。事件是否新增取決於實際場景是否有人出現，不能為了驗收把虛構事件加入正式紀錄。
 6. 只用完整 Argo sync；不跳過 PreSync，不以 force push、刪除影片／事件／PVC 或重設密碼處理部署問題。

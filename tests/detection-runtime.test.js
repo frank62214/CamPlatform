@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { mkdtemp, mkdir, writeFile, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, symlink, utimes } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { parseDetectionPlaylist, readLatestDetectionSegment, decodeDetectionFrame } from '../backend/detection-runtime-media.js';
@@ -25,10 +25,30 @@ test('PDT plus middle-of-segment offset is the event clock; implied following ti
   assert.notEqual(frames[0].frameKey, frames[1].frameKey);
 });
 
-test('missing PDT, gaps, and discontinuities never invent detection timestamps', () => {
-  assert.deepEqual(parseDetectionPlaylist('#EXTM3U\n#EXTINF:2,\nstream0.ts'), []);
+test('actual FFmpeg PDT +0800 and colon offsets preserve the source instant across UTC day rollover', () => {
+  for (const offset of ['+0800', '+08:00']) {
+    const text = playlist().replace('2026-10-03T10:00:00.000Z', `2026-10-04T00:34:25.632${offset}`);
+    const frame = parseDetectionPlaylist(text)[0];
+    assert.equal(frame.occurredAt, '2026-10-03T16:34:26.632Z');
+    assert.equal(frame.occurredAtMs, Date.UTC(2026, 9, 3, 16, 34, 26, 632));
+  }
+  const west = playlist().replace('2026-10-03T10:00:00.000Z', '2026-10-03T23:59:59.500-0130');
+  assert.equal(parseDetectionPlaylist(west)[0].occurredAt, '2026-10-04T01:30:00.500Z');
+});
+
+test('invalid PDT calendar dates, clock rollover, and malformed timezone offsets cannot become source timestamps', () => {
+  for (const value of ['2026-02-30T10:00:00+0800', '2026-10-04T24:00:00+0800',
+    '2026-10-04T10:60:00+0800', '2026-10-04T10:00:60+0800', '2026-10-04T10:00:00+0860',
+    '2026-10-04T10:00:00+2400', '2026-10-04T10:00:00+080', '2026-10-04 10:00:00+0800']) {
+    assert.equal(parseDetectionPlaylist(playlist().replace('2026-10-03T10:00:00.000Z', value))[0].occurredAtMs, null, value);
+  }
+});
+
+test('missing PDT and discontinuities preserve untimestamped segments for explicit estimates; gaps stay excluded', () => {
+  assert.equal(parseDetectionPlaylist('#EXTM3U\n#EXTINF:2,\nstream0.ts')[0].occurredAtMs, null);
   const frames = parseDetectionPlaylist(`${playlist()}#EXT-X-DISCONTINUITY\n#EXTINF:2,\nstream1.ts\n`);
-  assert.equal(frames.length, 1);
+  assert.equal(frames.length, 2);
+  assert.equal(frames[1].occurredAtMs, null);
   assert.equal(parseDetectionPlaylist(playlist().replace('#EXTINF:', '#EXT-X-GAP\n#EXTINF:')).length, 0);
 });
 
@@ -48,6 +68,7 @@ test('media reader bounds bytes and rejects stale/future streams and symbolic li
   await mkdir(folder, { recursive: true });
   await writeFile(path.join(folder, 'stream.m3u8'), playlist());
   await writeFile(path.join(folder, 'stream0.ts'), Buffer.from('media'));
+  await utimes(path.join(folder, 'stream0.ts'), (stamp + 2000) / 1000, (stamp + 2000) / 1000);
   assert.equal((await readLatestDetectionSegment(root, 'cam1', stamp + 3000)).bytes.toString(), 'media');
   assert.equal(await readLatestDetectionSegment(root, 'cam1', stamp + 32000), null);
   assert.equal(await readLatestDetectionSegment(root, 'cam1', stamp - 6000), null);
@@ -59,6 +80,63 @@ test('media reader bounds bytes and rejects stale/future streams and symbolic li
   try { await symlink(path.join(root, 'outside.ts'), path.join(folder, 'stream0.ts')); }
   catch (error) { if (error.code === 'EPERM') { t.diagnostic('Windows host does not permit file symlink creation'); return; } throw error; }
   await assert.rejects(readLatestDetectionSegment(root, 'cam1', stamp + 3000), /media file/);
+});
+
+test('fresh local segments with missing or drifting PDT use a visibly estimated midpoint clock', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'detection-clock-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const folder = path.join(root, 'cam1', 'hls');
+  await mkdir(folder, { recursive: true });
+  const file = path.join(folder, 'stream0.ts');
+  await writeFile(file, 'media');
+  await utimes(file, (stamp + 3000) / 1000, (stamp + 3000) / 1000);
+  for (const text of [
+    playlist().replace('2026-10-03T10:00:00.000Z', '2026-10-03T09:00:00.000Z'),
+    playlist().replace('2026-10-03T10:00:00.000Z', '2026-10-03T11:00:00.000Z'),
+    playlist().replace(/#EXT-X-PROGRAM-DATE-TIME:[^\n]+\n/, ''),
+  ]) {
+    await writeFile(path.join(folder, 'stream.m3u8'), text);
+    const frame = await readLatestDetectionSegment(root, 'cam1', stamp + 4000);
+    assert.equal(frame.timing, 'estimated');
+    assert.equal(frame.occurredAt, '2026-10-03T10:00:02.000Z');
+    assert.ok(frame.frameKey.includes(String(stamp + 3000)));
+  }
+  await writeFile(path.join(folder, 'stream.m3u8'), playlist());
+  assert.equal((await readLatestDetectionSegment(root, 'cam1', stamp + 4000)).timing, 'stream');
+  // Claimed current PDT cannot rehabilitate an old or future-dated actual file.
+  await utimes(file, (stamp - 31000) / 1000, (stamp - 31000) / 1000);
+  assert.equal(await readLatestDetectionSegment(root, 'cam1', stamp + 4000), null);
+  await utimes(file, (stamp + 10000) / 1000, (stamp + 10000) / 1000);
+  assert.equal(await readLatestDetectionSegment(root, 'cam1', stamp + 4000), null);
+});
+
+test('one physical TS sample keeps its identity across PDT expiry and is observed only once', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'detection-identity-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const folder = path.join(root, 'cam1', 'hls');
+  await mkdir(folder, { recursive: true });
+  await writeFile(path.join(folder, 'stream.m3u8'), playlist());
+  const file = path.join(folder, 'stream0.ts');
+  await writeFile(file, 'media');
+  await utimes(file, (stamp + 28000) / 1000, (stamp + 28000) / 1000);
+  const beforeExpiry = await readLatestDetectionSegment(root, 'cam1', stamp + 29000);
+  const afterExpiry = await readLatestDetectionSegment(root, 'cam1', stamp + 32000);
+  assert.equal(beforeExpiry.timing, 'stream');
+  assert.equal(afterExpiry.timing, 'estimated');
+  assert.notEqual(beforeExpiry.occurredAtMs, afterExpiry.occurredAtMs);
+  assert.equal(beforeExpiry.frameKey, afterExpiry.frameKey);
+  assert.equal(beforeExpiry.frameKey, `stream0.ts:${stamp + 28000}:5:1`);
+
+  let clock = stamp + 29000;
+  let sample = beforeExpiry;
+  const h = runtimeHarness({ dependencies: { now: () => clock, readSegment: async () => sample } });
+  h.enabled.delete('cam2'); h.runtime.start(); await until(() => h.waits.length === 1);
+  assert.equal(h.observations.length, 1);
+  clock = stamp + 32000; sample = afterExpiry;
+  h.waits.shift()(); await until(() => h.waits.length === 1);
+  assert.equal(h.observations.length, 1, 'The same sample cannot become a second positive after clock fallback');
+  assert.equal(h.statuses.at(-1).state, 'waiting');
+  await h.runtime.stop();
 });
 
 function fakeChild() {
@@ -106,7 +184,7 @@ function runtimeHarness(overrides = {}) {
     onStatus: (id, status) => statuses.push({ id, ...status }),
     ...overrides.options,
   }, { now: () => stamp + 3000,
-    readSegment: async (_root, id) => ({ frameKey: id, occurredAtMs: stamp + 1000, occurredAt: new Date(stamp + 1000).toISOString() }),
+    readSegment: async (_root, id) => ({ frameKey: id, occurredAtMs: stamp + 1000, occurredAt: new Date(stamp + 1000).toISOString(), timing: 'stream' }),
     decode: async () => Buffer.alloc(320 * 180 * 3),
     createModel: () => { models++; return { ready: Promise.resolve(), detect: async () => [{ class: 'person', score: 0.9 }], stop: async () => { stopped++; } }; },
     wait: (_ms, signal) => new Promise((resolve) => { waits.push(resolve); signal.addEventListener('abort', resolve, { once: true }); }),
@@ -125,6 +203,16 @@ test('server loop shares one detector, records without a browser, and skips dupl
   assert.equal(h.statuses.filter((item) => item.state === 'starting').length, 1);
   assert.equal(h.statuses.filter((item) => item.state === 'waiting').length, 0);
   await h.runtime.stop(); assert.equal(h.stopped(), 1);
+});
+
+test('server observations preserve estimated timing instead of relabeling it as stream time', async () => {
+  const h = runtimeHarness({ dependencies: {
+    readSegment: async (_root, id) => ({ frameKey: id, occurredAtMs: stamp + 1000,
+      occurredAt: new Date(stamp + 1000).toISOString(), timing: 'estimated' }),
+  } });
+  h.runtime.start(); await until(() => h.waits.length === 1);
+  assert.deepEqual(h.observations.map((item) => item.timing), ['estimated', 'estimated']);
+  await h.runtime.stop();
 });
 
 test('a rapid disable/enable revision change discards the old in-flight inference', async () => {

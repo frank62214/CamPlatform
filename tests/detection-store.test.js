@@ -36,6 +36,19 @@ test('atomic store persists events, enabled settings and episode checkpoint acro
   await restarted.ready();
 });
 
+test('estimated event timestamps and precision survive persistence and restart alongside stream events', async (t) => {
+  const config = await fixture(t);
+  const estimated = { ...event('estimated', '2026-10-04T11:59:58.000Z'), timing: 'estimated' };
+  const store = createEventStore(config, { now: () => NOW });
+  await store.init();
+  await store.commit('cam1', { event: estimated });
+  await store.commit('cam1', { event: event() });
+  await store.close();
+  const restarted = createEventStore(config, { now: () => NOW });
+  await restarted.init();
+  assert.deepEqual(restarted.list().events, [event(), estimated]);
+});
+
 test('events are published only after rename; failed writes retain the prior durable state and can retry', async (t) => {
   const config = await fixture(t);
   let fail = false;
@@ -133,6 +146,9 @@ test('invalid event/checkpoint writes are rejected before changing storage', asy
   const store = createEventStore(config, { now: () => NOW });
   await store.init();
   await assert.rejects(store.commit('cam1', { event: { ...event(), score: NaN } }), TypeError);
+  for (const timing of [undefined, null, 'unknown', 'STREAM', 1]) {
+    await assert.rejects(store.commit('cam1', { event: { ...event(), timing } }), TypeError);
+  }
   await assert.rejects(store.commit('cam1', { checkpoint: { ...checkpoint, lastObservedAt: 'tomorrow' } }), TypeError);
   await assert.rejects(store.commit('other', { enabled: true }), /Unknown/);
   assert.equal(store.list().total, 0);

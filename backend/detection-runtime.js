@@ -48,6 +48,7 @@ export function createDetectionRuntime({
           }
           if (segment.frameKey === state.frameKey || segment.occurredAtMs <= state.lastTime) {
             if (now() - state.lastTime <= MAX_FRAME_AGE_MS) status(id, 'watching', { lastFrameAt: new Date(state.lastTime).toISOString() });
+            else status(id, 'waiting', { message: 'Waiting for a fresh timestamped stream frame' });
             continue;
           }
           if (!model) { modelReady = false; model = createModel({ modelPath }); }
@@ -63,7 +64,7 @@ export function createDetectionRuntime({
           try { predictions = await model.detect(pixels); } catch (error) { modelFailed = true; throw error; }
           if (!valid()) continue;
           if (now() - segment.occurredAtMs > MAX_FRAME_AGE_MS) { status(id, 'waiting'); continue; }
-          await onObservation(id, { occurredAt: segment.occurredAt, predictions, timing: 'stream', frameKey: segment.frameKey });
+          await onObservation(id, { occurredAt: segment.occurredAt, predictions, timing: segment.timing, frameKey: segment.frameKey });
           // Persistence may queue behind a settings change; it can discard this
           // observation, so do not commit its cursor/status to the new generation.
           if (!valid()) continue;
