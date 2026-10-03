@@ -19,7 +19,7 @@ Windows 的環境變數寫法為 `$env:RUN_DETECTION_MODEL_SMOKE='1'`。一般 `
 
 | 測試組 | 驗證事項 |
 | --- | --- |
-| `detection-runtime.test.js` | PDT 的 Z／+08:00／+0800、取樣時間與檔案時間估算、來源格式與路徑、檔案容量、過期／未來影格、實體影格去重、序列化、取消、逾時、重試、設定 revision 競態、離線本機模型 |
+| `detection-runtime.test.js` | PDT 的 Z／+08:00／+0800、取樣時間與檔案時間估算、來源格式與路徑、檔案容量、NFS 換檔重試及上限、過期／未來影格、實體影格去重、序列化、取消、逾時、重試、設定 revision 競態、離線本機模型 |
 | `detection-store.test.js` | 原子保存、寫入失敗不發布、重試、重啟還原、筆數／天數、時區日期、損壞檔案不覆寫、實際可寫探測 |
 | `detection-service.test.js` | 無客戶端的常駐生命週期、連續樣本、首次陽性時間、冷卻、跨重啟去重、相機獨立、設定競態、儲存錯誤與狀態 |
 | `detection-api.test.js` | 未登入、跨來源、查詢與 JSON body 驗證、共享事件與持久設定 |

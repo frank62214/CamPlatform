@@ -5,7 +5,7 @@ import { PassThrough } from 'node:stream';
 import { mkdtemp, mkdir, writeFile, rm, symlink, utimes } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { parseDetectionPlaylist, readLatestDetectionSegment, decodeDetectionFrame } from '../backend/detection-runtime-media.js';
+import { parseDetectionPlaylist, readLatestDetectionSegment, readDetectionMediaFile, decodeDetectionFrame } from '../backend/detection-runtime-media.js';
 import { createDetectionRuntime } from '../backend/detection-runtime.js';
 import { createDetectionModel } from '../backend/detection-runtime-model.js';
 
@@ -80,6 +80,69 @@ test('media reader bounds bytes and rejects stale/future streams and symbolic li
   try { await symlink(path.join(root, 'outside.ts'), path.join(folder, 'stream0.ts')); }
   catch (error) { if (error.code === 'EPERM') { t.diagnostic('Windows host does not permit file symlink creation'); return; } throw error; }
   await assert.rejects(readLatestDetectionSegment(root, 'cam1', stamp + 3000), /media file/);
+});
+
+function readRaceFixture({ alwaysChanged = false, incomplete = false, missing = false } = {}) {
+  let stats = 0; let opens = 0; let closes = 0;
+  const waits = [];
+  const stat = (ino) => ({ ino, dev: 1, size: 5, mtimeMs: stamp, isFile: () => true, isSymbolicLink: () => false });
+  return {
+    dependencies: {
+      statFile: async () => {
+        stats++;
+        if (missing && stats === 1) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+        return stat(alwaysChanged || stats === 1 ? 1 : 2);
+      },
+      openFile: async () => {
+        opens++;
+        const attempt = opens;
+        return {
+          stat: async () => stat(incomplete && attempt === 1 ? 1 : 2),
+          read: async (target) => {
+            if (incomplete && attempt === 1) return { bytesRead: 0 };
+            target.set(Buffer.from('fresh')); return { bytesRead: 5 };
+          },
+          close: async () => { closes++; },
+        };
+      },
+      wait: async (ms) => { waits.push(ms); },
+    },
+    counts: () => ({ stats, opens, closes, waits }),
+  };
+}
+
+test('NFS stale lstat inode is retried with a newly opened and fully validated file', async () => {
+  const fixture = readRaceFixture();
+  const result = await readDetectionMediaFile('/unused', 5, fixture.dependencies);
+  assert.equal(result.bytes.toString(), 'fresh');
+  assert.deepEqual(fixture.counts(), { stats: 2, opens: 2, closes: 2, waits: [25] });
+});
+
+test('metadata race retries are capped at three closed handles; missing/incomplete files can recover', async () => {
+  const persistent = readRaceFixture({ alwaysChanged: true });
+  await assert.rejects(readDetectionMediaFile('/unused', 5, persistent.dependencies), /Media file changed/);
+  assert.deepEqual(persistent.counts(), { stats: 3, opens: 3, closes: 3, waits: [25, 25] });
+  for (const option of [{ missing: true }, { incomplete: true }]) {
+    const fixture = readRaceFixture(option);
+    assert.equal((await readDetectionMediaFile('/unused', 5, fixture.dependencies)).bytes.toString(), 'fresh');
+    assert.equal(fixture.counts().stats, 2);
+    assert.equal(fixture.counts().opens, fixture.counts().closes);
+    assert.deepEqual(fixture.counts().waits, [25]);
+  }
+});
+
+test('retry never permits symlinks, oversized files, or non-regular files', async () => {
+  for (const invalid of [{ isSymbolicLink: () => true }, { size: 6 }, { isFile: () => false }]) {
+    const fixture = readRaceFixture(); let stats = 0;
+    fixture.dependencies.statFile = async () => {
+      stats++;
+      return { size: 5, isFile: () => true, isSymbolicLink: () => false, ...invalid };
+    };
+    await assert.rejects(readDetectionMediaFile('/unused', 5, fixture.dependencies), /Invalid media file/);
+    assert.equal(stats, 1);
+    assert.equal(fixture.counts().opens, 0);
+    assert.deepEqual(fixture.counts().waits, []);
+  }
 });
 
 test('fresh local segments with missing or drifting PDT use a visibly estimated midpoint clock', async (t) => {

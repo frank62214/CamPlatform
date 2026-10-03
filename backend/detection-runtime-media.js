@@ -1,6 +1,7 @@
 import { constants } from 'node:fs';
 import { open, lstat, realpath } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
+import { setTimeout as pause } from 'node:timers/promises';
 import path from 'node:path';
 
 export const MAX_FRAME_AGE_MS = 30_000;
@@ -54,24 +55,42 @@ export function parseDetectionPlaylist(text) {
   return segments;
 }
 
-async function boundedRead(file, maxBytes) {
-  const before = await lstat(file);
+function changedMedia(message = 'Media file changed') {
+  return Object.assign(new Error(message), { code: 'MEDIA_FILE_CHANGED' });
+}
+
+async function readMediaAttempt(file, maxBytes, statFile, openFile) {
+  const before = await statFile(file);
   if (!before.isFile() || before.isSymbolicLink() || before.size <= 0 || before.size > maxBytes) throw new Error('Invalid media file');
-  const handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  const handle = await openFile(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const stat = await handle.stat();
-    if (!stat.isFile() || stat.dev !== before.dev || stat.ino !== before.ino || stat.size !== before.size) throw new Error('Media file changed');
+    if (!stat.isFile() || stat.size <= 0 || stat.size > maxBytes) throw new Error('Invalid media file');
+    if (stat.dev !== before.dev || stat.ino !== before.ino || stat.size !== before.size) throw changedMedia();
     const data = Buffer.alloc(stat.size);
     let offset = 0;
     while (offset < data.length) {
       const { bytesRead } = await handle.read(data, offset, data.length - offset, offset);
-      if (!bytesRead) throw new Error('Incomplete media file');
+      if (!bytesRead) throw changedMedia('Incomplete media file');
       offset += bytesRead;
     }
     const after = await handle.stat();
-    if (after.size !== stat.size || after.mtimeMs !== stat.mtimeMs) throw new Error('Media file changed');
+    if (after.size !== stat.size || after.mtimeMs !== stat.mtimeMs) throw changedMedia();
     return { bytes: data, mtimeMs: after.mtimeMs };
   } finally { await handle.close(); }
+}
+
+/** Retry atomic replacement/NFS metadata races, revalidating every reopened file. */
+export async function readDetectionMediaFile(file, maxBytes, {
+  statFile = lstat, openFile = open, wait = pause,
+} = {}) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try { return await readMediaAttempt(file, maxBytes, statFile, openFile); }
+    catch (error) {
+      if (attempt === 2 || !['MEDIA_FILE_CHANGED', 'ENOENT'].includes(error.code)) throw error;
+      await wait(25);
+    }
+  }
 }
 
 export async function readLatestDetectionSegment(dataRoot, cameraId, nowMs = Date.now()) {
@@ -86,10 +105,10 @@ export async function readLatestDetectionSegment(dataRoot, cameraId, nowMs = Dat
   const actual = await realpath(directory);
   const relative = path.relative(await realpath(root), actual);
   if (relative !== path.join(cameraId, 'hls')) throw new Error('Media escaped storage root');
-  const playlist = await boundedRead(path.join(directory, 'stream.m3u8'), MAX_PLAYLIST_BYTES);
+  const playlist = await readDetectionMediaFile(path.join(directory, 'stream.m3u8'), MAX_PLAYLIST_BYTES);
   const segment = parseDetectionPlaylist(playlist.bytes.toString('utf8')).at(-1);
   if (!segment) return null;
-  const { bytes, mtimeMs } = await boundedRead(path.join(directory, segment.name), MAX_SEGMENT_BYTES);
+  const { bytes, mtimeMs } = await readDetectionMediaFile(path.join(directory, segment.name), MAX_SEGMENT_BYTES);
   const fresh = (stamp) => Number.isFinite(stamp) && nowMs - stamp <= MAX_FRAME_AGE_MS && stamp <= nowMs + 5000;
   // A producer timestamp must never make an old local file look live. Conversely,
   // some live producers drift their PDT clock; label the file-time estimate honestly.
