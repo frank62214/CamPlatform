@@ -30,6 +30,42 @@ export interface RecordingPage {
   offset: number
 }
 
+export interface DetectionCameraStatus {
+  cameraId: string
+  enabled: boolean
+  state: 'disabled' | 'starting' | 'watching' | 'waiting' | 'error'
+  present: boolean
+  count: number
+  lastFrameAt: string | null
+  lastEventAt: string | null
+  message?: string
+}
+
+export interface DetectionStatus {
+  enabled: boolean
+  retentionDays: number
+  cameras: DetectionCameraStatus[]
+}
+
+export interface PersonEvent {
+  id: string
+  cameraId: string
+  cameraName: string
+  occurredAt: string
+  recordedAt?: string
+  count: number
+  score: number
+  timing: 'stream' | 'estimated'
+}
+
+export interface PersonEventPage {
+  events: PersonEvent[]
+  total: number
+  limit: number
+  offset: number
+  retentionDays: number
+}
+
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message)

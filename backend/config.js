@@ -44,9 +44,24 @@ export function loadConfig(env = process.env) {
   if (!/^[+-](?:0\d|1[0-4]):[0-5]\d$/.test(recordingUtcOffset)) {
     throw new Error('RECORDING_UTC_OFFSET must be an offset such as +08:00');
   }
+  const detectionValue = env.DETECTION_ENABLED ?? 'false';
+  if (!['true', 'false'].includes(detectionValue)) throw new Error('DETECTION_ENABLED must be true or false');
+  const dataRoot = path.resolve(env.DATA_ROOT ?? '/data');
+  const eventsRoot = path.resolve(env.EVENTS_ROOT ?? '/events');
+  const contains = (parent, child) => {
+    const relative = path.relative(parent, child);
+    return relative === '' || relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  };
+  if (contains(dataRoot, eventsRoot) || contains(eventsRoot, dataRoot)) {
+    throw new Error('EVENTS_ROOT and DATA_ROOT must be separate non-overlapping directories');
+  }
   return Object.freeze({
     port: integer(env, 'PORT', 3000, 0, 65535),
-    dataRoot: path.resolve(env.DATA_ROOT ?? '/data'),
+    dataRoot, eventsRoot,
+    detectionEnabled: detectionValue === 'true',
+    detectionIntervalMs: integer(env, 'DETECTION_INTERVAL_MS', 2000, 500, 60_000),
+    eventRetentionDays: integer(env, 'EVENT_RETENTION_DAYS', 7, 1, 90),
+    eventMaxCount: integer(env, 'EVENT_MAX_COUNT', 20_000, 100, 100_000),
     cameraIds, recordingUtcOffset,
     username: env.AUTH_USERNAME,
     passwordHash: env.AUTH_PASSWORD_HASH,

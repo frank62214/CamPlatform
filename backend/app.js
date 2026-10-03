@@ -3,6 +3,7 @@ import { createAuth } from './auth.js';
 import { createMedia, validDate } from './media.js';
 import { HttpError } from './errors.js';
 import { createEventClips } from './event-clips.js';
+import { createDetectionService } from './detection-service.js';
 
 function pagination(query) {
   const { date, limit = '50', offset = '0' } = query;
@@ -14,7 +15,7 @@ function pagination(query) {
   return { date, limit: Number(limit), offset: Number(offset) };
 }
 
-export function createApp(config) {
+export function createApp(config, { detection = createDetectionService(config) } = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.disable('etag');
@@ -32,7 +33,7 @@ export function createApp(config) {
   });
   app.get('/healthz', (_req, res) => res.json({ status: 'ok' }));
   app.get('/readyz', async (_req, res) => {
-    try { await media.ready(); res.json({ status: 'ready' }); }
+    try { await media.ready(); if (config.detectionEnabled) await detection.ready(); res.json({ status: 'ready' }); }
     catch { res.status(503).json({ status: 'unavailable' }); }
   });
   app.post('/api/auth/login', auth.checkOrigin, auth.rateLimit, express.json({ limit: '8kb' }), auth.login);
@@ -42,6 +43,26 @@ export function createApp(config) {
   app.use(auth.requireAuth);
   app.get('/api/auth/me', auth.me);
   app.post('/api/auth/logout', auth.checkOrigin, auth.logout);
+  app.get('/api/detection', (_req, res) => res.json(detection.status()));
+  app.get('/api/person-events', (req, res) => {
+    if (Object.keys(req.query).some((key) => !['cameraId', 'date', 'limit', 'offset'].includes(key))) {
+      throw new HttpError(400, 'INVALID_QUERY', 'Unknown event query parameter');
+    }
+    const query = pagination(req.query);
+    if (req.query.cameraId !== undefined) {
+      if (typeof req.query.cameraId !== 'string') throw new HttpError(400, 'INVALID_CAMERA', 'Use one cameraId');
+      if (!config.cameraIds.includes(req.query.cameraId)) throw new HttpError(404, 'CAMERA_NOT_FOUND', 'Camera not found');
+      query.cameraId = req.query.cameraId;
+    }
+    res.json(detection.events(query));
+  });
+  app.post('/api/cameras/:cameraId/detection', auth.checkOrigin, express.json({ limit: '1kb' }), async (req, res) => {
+    if (!req.is('application/json')) throw new HttpError(415, 'INVALID_CONTENT_TYPE', 'Use application/json');
+    if (!req.body || Array.isArray(req.body) || Object.keys(req.body).length !== 1 || typeof req.body.enabled !== 'boolean') {
+      throw new HttpError(400, 'INVALID_SETTING', 'Provide only enabled as a boolean');
+    }
+    res.json(await detection.setEnabled(req.params.cameraId, req.body.enabled));
+  });
   app.get('/api/cameras', (_req, res) => res.json({ cameras: config.cameraIds.map((id) => ({
     id, name: ({ cam1: '客廳', cam2: '大門' })[id] ?? id, liveUrl: `/${id}/hls/stream.m3u8`,
   })) }));

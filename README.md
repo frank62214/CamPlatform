@@ -1,5 +1,7 @@
 # CamPlatform
 
+完整的現況、API、監控／回放規則與部署限制見 [系統規格](docs/SPEC.md)。
+
 Vue 3 + Express 5 的攝影機監控平台。登入由後端驗證 scrypt 密碼雜湊並簽發 JWT；即時 HLS（playlist / segment）、歷史清單及 MP4 回放（GET / HEAD / Range）都必須攜帶有效 token。前端以同源 HttpOnly Cookie 傳送，API client 也可用 Bearer；不再把帳密放進前端，也不把 token 放進 URL 或 sessionStorage。
 
 ## 本機啟動
@@ -54,6 +56,9 @@ npm run dev
 | `GET /api/auth/me` | 回傳目前 user 與到期時間 |
 | `POST /api/auth/logout` | 撤銷這次登入的 token 並清除 Cookie |
 | `GET /api/cameras` | 攝影機與同源 liveUrl |
+| `GET /api/detection` | 伺服器偵測及各攝影機狀態 |
+| `POST /api/cameras/:id/detection` | 保存 `{enabled:boolean}`，需同源驗證 |
+| `GET /api/person-events?cameraId=cam1&date=YYYY-MM-DD&limit=50&offset=0` | 持久事件清單、總數與保留天數 |
 | `GET /api/cameras/:id/dates` | 日期資料夾，最新在前；可能包含目前仍在錄影的日期 |
 | `GET /api/cameras/:id/records?date=YYYY-MM-DD&limit=20&offset=0` | `{records,total,limit,offset}`；date 可省略，limit 預設 50、上限 100 |
 | `GET /api/cameras/:id/event-clip?at=2026-09-28T12:00:00Z` | 尋找事件前後各 10 秒；回傳 `status,parts,approximate,partial`，每段含 `record,startSeconds,endSeconds` |
@@ -64,22 +69,19 @@ npm run dev
 
 每筆錄影包含 `id,name,date,timeStamp,size,fileUrl`，另有 `time,timePrecision,status` 等顯示資訊。可播放的 `fileUrl` 已是完整的同源路徑，不能再加 `/cam1/api/records/` 前綴；未完成時為 null。錯誤格式為 `{error:{code,message}}`。
 
-## 人物提示與事件回放
+## 人物持續監控與事件回放
 
-在「即時影像」開啟各攝影機的「人物偵測」。畫面連續兩次辨識到人物後，會顯示提示並在下方「人物事件」清單記下攝影機、時間及人數。模型只辨識人物出現，不辨識身分或判斷移動方向。連續三次未見人物才重新待命，通知至少間隔 15 秒；一般每次辨識完成後間隔 1 秒再取樣，短暫經過仍可能漏報。
+人物偵測由伺服器常駐執行，與瀏覽器生命週期無關。即時頁面的「伺服器持續偵測」開關會保存該攝影機的伺服器設定；關閉網頁、切換分頁或登出不會停止已啟用的攝影機。網頁每 5 秒讀取偵測狀態及共享事件，支援攝影機、日期篩選和分頁，所有授權裝置看到同一份紀錄。
 
-點「回看 ±10 秒」會定位事件前後各 10 秒，自動播放並在片段結束時停止；跨檔案／午夜會依序播放可用段落。API 以 MP4 `mvhd` 的實際長度限制範圍，不以最近的任意檔案代替缺失錄影。僅部分範圍可用時會明確提示；目前小時 MP4 須完成封存後才能回放，等待中的事件每 15 秒重新檢查。中斷且兩分鐘未更新的未完成錄影不會永久顯示為寫入中。
+伺服器從現有唯讀 HLS 分段擷取影格，依 `EXT-X-PROGRAM-DATE-TIME` 加取樣位置保存影像時間。COCO-SSD / WASM 在 Node worker 執行，不阻塞 API，也不需要瀏覽器下載模型；模型在 image 建置時校驗 SHA-256 並包入映像。缺少時間、影格過期、重複影格或分析失敗不會被當作有效人物觀察。
 
-- 偵測僅在此頁可見、即時影像正在播放且開關啟用時運作；暫停、切到歷史頁、登出或關閉頁面會停止／暫停偵測。歷史回放不會產生人物事件。
-- 事件依登入帳號保存在目前瀏覽器的 localStorage，最多 200 筆；重整後可查看，不跨裝置同步。清除瀏覽器資料也會清除事件；瀏覽器禁止儲存時會顯示警示。
-- 使用延遲載入的 TensorFlow.js / COCO-SSD `lite_mobilenet_v2`。影格在瀏覽器內辨識，不上傳影像；首次啟用需從 `storage.googleapis.com/tfjs-models/` 下載模型權重。模型下載或瀏覽器運算失敗時可單獨重試，不影響影像播放器。
-- 多台攝影機共用模型並依序運算。模型準確度受光線、遮擋、人物大小與裝置速度影響；此功能是監控輔助。
+分數至少 0.6、連續兩次有效取樣看見人物才記錄一次出現，連續三次未見人物才重新待命，每支攝影機兩次確認通知至少間隔 15 秒。預設每輪等待 2 秒；HLS 分段及處理速度影響實際頻率，快速經過、光線及遮擋仍可能造成漏報或誤報。此功能不辨識身分。
 
-### 事件時間與 recorder 更新
+事件與啟用設定保存到獨立可寫的 `EVENTS_ROOT/events.json`；正式環境保留最近 **7 天／最多 20,000 筆**。瀏覽器不再以 localStorage 保存正式事件；舊瀏覽器紀錄不自動匯入，也不回掃之前未偵測的影片。設定、事件及必要的去重狀態可跨 backend 重啟保留。
 
-新錄影使用 `YYYY-MM-DD_HH-MM-SS_UUID.mp4`，HLS 包含 `EXT-X-PROGRAM-DATE-TIME`。本 repo 的 `stream.js` 與 Deployment 的 `CamPlatform/FFMPEG/files/record.sh` 均加入 `program_date_time`；沿用 recorder 已有的時鐘對齊、UUID 檔名與跨日資料夾維護。舊的範例 patch 已整合並移除，正式 recorder 仍由既有 GitOps 流程管理。
+點「回看 ±10 秒」會定位事件前後各 10 秒，自動播放並在片段結束時停止；跨檔案／午夜會依序播放可用段落。API 以 MP4 `mvhd` 實際長度限制範圍，不用附近無關檔案替代。部分缺失會提示；**目前小時 MP4 須封檔後才能回放**，等待中的事件每 15 秒重新檢查。事件保存與錄影清理獨立，影片已清理時事件仍可能存在。
 
-前端優先使用 HLS 的影像時間（hls.js `playingDate` 或原生 `getStartDate`）；缺少時間標記時以目前時間扣除播放器落後量估算，介面會註明。舊小時檔名只知道小時，起錄不在整點或中途重啟時會有偏差，回放也會註明為估算值。秒級檔名仍可能有緩衝或關鍵影格的時間偏移；部署後應以實際攝影機事件核對。自訂檔名只有檔案修改時間時，不用於事件定位。
+本機啟用需安裝 FFmpeg、執行 `npm run model:prepare`，並設定 `DETECTION_ENABLED=true`、可寫且不位於 `DATA_ROOT` 內的 `EVENTS_ROOT`。正式設定及完整行為見 [系統規格](docs/SPEC.md)、[驗收紀錄](docs/VERIFICATION.md)。
 
 模型 API 參考 [COCO-SSD 官方文件](https://github.com/tensorflow/tfjs-models/blob/master/coco-ssd/README.md)；串流時間標記參考 [FFmpeg HLS 文件](https://ffmpeg.org/ffmpeg-formats.html#hls-2)。
 

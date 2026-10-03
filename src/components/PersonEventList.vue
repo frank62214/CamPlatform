@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import CameraView from './CameraView.vue'
-import { apiRequest, errorMessage, isAborted, type Camera, type HistoryRecord } from '../api'
-import type { PersonEvent } from '../detection/person-events'
+import { apiRequest, errorMessage, isAborted, type Camera, type HistoryRecord, type PersonEvent, type PersonEventPage } from '../api'
 
 interface EventClip {
   status: 'ready' | 'pending' | 'unavailable'
@@ -11,10 +10,20 @@ interface EventClip {
   partial?: boolean
 }
 
-const props = defineProps<{ events: PersonEvent[]; cameras: Camera[]; storageError: string }>()
+defineProps<{ cameras: Camera[] }>()
+const PAGE_SIZE = 50
 const cameraFilter = ref('')
-const visibleCount = ref(20)
-const filtered = computed(() => props.events.filter((event) => !cameraFilter.value || event.cameraId === cameraFilter.value))
+const dateFilter = ref('')
+const events = ref<PersonEvent[]>([])
+const total = ref(0)
+const offset = ref(0)
+const retentionDays = ref<number | null>(null)
+const listLoading = ref(true)
+const listError = ref('')
+const lastUpdated = ref('')
+let listRequest: AbortController | undefined
+let pollTimer: ReturnType<typeof setTimeout> | undefined
+let disposed = false
 const selected = ref<PersonEvent | null>(null)
 const clip = ref<EventClip | null>(null)
 const partIndex = ref(0)
@@ -28,7 +37,44 @@ let request: AbortController | null = null
 let retryTimer: ReturnType<typeof setTimeout> | undefined
 
 function formatTime(iso: string) {
-  return new Date(iso).toLocaleString('zh-TW', { hour12: false })
+  return new Date(iso).toLocaleString('zh-TW', { hour12: false, timeZone: 'Asia/Taipei' })
+}
+
+async function loadEvents(pageOffset = offset.value, quiet = false) {
+  if (disposed) return
+  clearTimeout(pollTimer)
+  listRequest?.abort()
+  const current = new AbortController()
+  listRequest = current
+  if (!quiet) listLoading.value = true
+  const timeout = setTimeout(() => current.abort(), 10_000)
+  const query = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(pageOffset) })
+  if (cameraFilter.value) query.set('cameraId', cameraFilter.value)
+  if (dateFilter.value) query.set('date', dateFilter.value)
+  try {
+    const result = await apiRequest<PersonEventPage>(`/api/person-events?${query}`, { signal: current.signal })
+    if (disposed || current !== listRequest || current.signal.aborted) return
+    if (result.total > 0 && pageOffset >= result.total) {
+      await loadEvents(Math.floor((result.total - 1) / PAGE_SIZE) * PAGE_SIZE)
+      return
+    }
+    events.value = result.events
+    total.value = result.total
+    offset.value = result.total ? result.offset : 0
+    retentionDays.value = result.retentionDays
+    lastUpdated.value = new Date().toISOString()
+    listError.value = ''
+  } catch (cause) {
+    if (disposed || current !== listRequest) return
+    listError.value = current.signal.aborted ? '事件清單讀取逾時，稍後將自動重試。'
+      : errorMessage(cause, '無法讀取伺服器事件，稍後將自動重試。')
+  } finally {
+    clearTimeout(timeout)
+    if (!disposed && current === listRequest) {
+      listLoading.value = false
+      pollTimer = setTimeout(() => void loadEvents(offset.value, true), 5000)
+    }
+  }
 }
 
 function closePreview() {
@@ -58,17 +104,21 @@ async function loadClip(event: PersonEvent, scroll = true) {
     preview.value?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
     preview.value?.focus({ preventScroll: true })
   }
+  if (current.signal.aborted || request !== current || disposed) return
+  const timeout = setTimeout(() => current.abort(), 20_000)
   try {
     const result = await apiRequest<EventClip>(
       `/api/cameras/${encodeURIComponent(event.cameraId)}/event-clip?at=${encodeURIComponent(event.occurredAt)}`,
       { signal: current.signal },
     )
-    if (current.signal.aborted) return
+    if (current.signal.aborted || request !== current || disposed) return
     clip.value = result
     if (result.status === 'pending') retryTimer = setTimeout(() => void loadClip(event, false), 15000)
   } catch (cause) {
-    if (!current.signal.aborted && !isAborted(cause)) error.value = errorMessage(cause, '無法取得事件片段，請稍後重試。')
+    if (request === current && !disposed) error.value = isAborted(cause) ? '取得事件片段逾時，請稍後重試。'
+      : errorMessage(cause, '無法取得事件片段，請稍後重試。')
   } finally {
+    clearTimeout(timeout)
     if (request === current) loading.value = false
   }
 }
@@ -85,30 +135,55 @@ function replay() {
   playerKey.value++
 }
 
-onBeforeUnmount(closePreview)
+watch([cameraFilter, dateFilter], () => {
+  closePreview()
+  events.value = []
+  total.value = 0
+  offset.value = 0
+  lastUpdated.value = ''
+  listError.value = ''
+  void loadEvents(0)
+})
+onMounted(() => void loadEvents())
+onBeforeUnmount(() => {
+  disposed = true
+  clearTimeout(pollTimer)
+  listRequest?.abort()
+  closePreview()
+})
 </script>
 
 <template>
   <section class="events-card" aria-labelledby="person-events-title">
     <div class="events-heading">
       <div>
-        <h2 id="person-events-title">人物事件 <span>{{ events.length }}</span></h2>
-        <p>監控時記下人物出現的時刻，點選即可回看前後各 10 秒。</p>
+        <h2 id="person-events-title">人物事件 <span>{{ total }} 筆</span></h2>
+        <p>伺服器保存人物出現的時刻，所有裝置共用；點選即可回看前後各 10 秒。</p>
       </div>
-      <label class="events-filter">攝影機
-        <select v-model="cameraFilter" class="form-select form-select-sm" @change="visibleCount = 20">
-          <option value="">全部攝影機</option>
-          <option v-for="camera in cameras" :key="camera.id" :value="camera.id">{{ camera.name }}</option>
-        </select>
-      </label>
+      <div class="events-filters">
+        <div class="events-filter">
+          <label for="person-events-camera">攝影機</label>
+          <select id="person-events-camera" v-model="cameraFilter" class="form-select form-select-sm">
+            <option value="">全部攝影機</option>
+            <option v-for="camera in cameras" :key="camera.id" :value="camera.id">{{ camera.name }}</option>
+          </select>
+        </div>
+        <div class="events-filter">
+          <label for="person-events-date">日期（台北）</label>
+          <input id="person-events-date" v-model="dateFilter" type="date" class="form-control form-control-sm" />
+        </div>
+        <button v-if="dateFilter" type="button" class="btn btn-sm btn-outline-secondary" @click="dateFilter = ''">全部日期</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="listLoading" @click="loadEvents()">重新整理</button>
+      </div>
     </div>
-    <p v-if="storageError" class="text-danger small" role="alert">{{ storageError }}</p>
-    <p v-if="!filtered.length" class="events-empty">尚無人物事件。在即時影像開啟「人物偵測」，有人出現時會列在這裡。</p>
-    <div v-else class="table-responsive">
+    <p v-if="listError" class="text-danger small" role="alert">{{ listError }}<span v-if="events.length"> 以下保留上次取得的事件。</span></p>
+    <p v-if="listLoading" class="events-empty" role="status">正在讀取伺服器事件…</p>
+    <p v-else-if="!events.length && !listError" class="events-empty">{{ cameraFilter || dateFilter ? '此篩選條件下尚無人物事件，可調整攝影機或日期。' : '尚無人物事件。在即時影像開啟「伺服器持續偵測」，有人出現時會列在這裡。' }}</p>
+    <div v-else-if="events.length && !listLoading" class="table-responsive">
       <table class="table align-middle event-table">
         <thead><tr><th scope="col">事件時間</th><th scope="col">攝影機</th><th scope="col">事件</th><th scope="col">片段</th></tr></thead>
         <tbody>
-          <tr v-for="event in filtered.slice(0, visibleCount)" :key="event.id" :class="{ selected: selected?.id === event.id }">
+          <tr v-for="event in events" :key="event.id" :class="{ selected: selected?.id === event.id }">
             <td><time :datetime="event.occurredAt">{{ formatTime(event.occurredAt) }}</time>
               <small v-if="event.timing === 'estimated'">影像時間為估算值</small></td>
             <td>{{ cameras.find((camera) => camera.id === event.cameraId)?.name ?? event.cameraName }}</td>
@@ -119,8 +194,12 @@ onBeforeUnmount(closePreview)
           </tr>
         </tbody>
       </table>
-      <button v-if="filtered.length > visibleCount" type="button" class="btn btn-sm btn-outline-secondary" @click="visibleCount += 20">顯示更多事件</button>
     </div>
+    <nav v-if="total > PAGE_SIZE" class="events-pagination" aria-label="人物事件分頁">
+      <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="listLoading || offset === 0" @click="loadEvents(Math.max(0, offset - PAGE_SIZE))">上一頁</button>
+      <span>{{ offset + 1 }}–{{ offset + events.length }} / {{ total }}</span>
+      <button type="button" class="btn btn-sm btn-outline-secondary" :disabled="listLoading || offset + PAGE_SIZE >= total" @click="loadEvents(offset + PAGE_SIZE)">下一頁</button>
+    </nav>
 
     <div v-if="selected" ref="preview" class="event-preview" tabindex="-1" aria-label="事件片段回放">
       <div class="preview-heading">
@@ -144,7 +223,9 @@ onBeforeUnmount(closePreview)
       <p v-else role="status">找不到涵蓋此事件的已完成錄影。錄影可能已移除，或當時沒有錄到影像。
         <button type="button" class="btn btn-sm btn-outline-secondary" @click="loadClip(selected)">重新檢查</button></p>
     </div>
-    <p class="events-footnote">僅在此頁可見且即時影像播放時偵測。此瀏覽器為目前帳號保留最近 200 筆事件；不跨裝置同步。</p>
+    <p class="events-footnote">關閉網頁仍持續監控。<span v-if="retentionDays !== null">伺服器保留最近 {{ retentionDays }} 天事件；</span>事件時間以台北時間顯示，錄影仍依錄影保存期限提供。
+      <span v-if="lastUpdated">清單更新於 {{ formatTime(lastUpdated) }}，每 5 秒自動更新。</span>
+    </p>
   </section>
 </template>
 
@@ -155,7 +236,9 @@ onBeforeUnmount(closePreview)
 .events-heading h2 span { margin-left: 0.25rem; color: #65748a; font-size: 0.9rem; }
 .events-heading p, .events-footnote { margin: 0; color: #65748a; font-size: 0.83rem; line-height: 1.6; }
 .events-filter { display: flex; align-items: center; gap: 0.6rem; font-size: 0.85rem; white-space: nowrap; }
-.events-filter select { width: auto; }
+.events-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 0.7rem; }
+.events-filter select, .events-filter input { width: auto; min-width: 0; }
+.events-pagination { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; margin: 0.8rem 0; font-size: 0.85rem; }
 .events-empty { padding: 1.25rem 0; color: #65748a; font-size: 0.92rem; }
 .event-table { font-size: 0.85rem; }
 .event-table th { color: #65748a; font-weight: 500; white-space: nowrap; }
@@ -170,6 +253,9 @@ onBeforeUnmount(closePreview)
 .clip-complete { display: flex; flex-wrap: wrap; align-items: center; gap: 0.8rem; margin-top: 0.8rem; }
 .events-footnote { margin-top: 1rem; }
 @media (max-width: 575px) {
+  .events-filters { width: 100%; }
+  .events-filter { width: 100%; justify-content: space-between; }
+  .events-filter select, .events-filter input { max-width: 65%; }
   .event-table th:nth-child(3), .event-table td:nth-child(3) { display: none; }
   .event-table th, .event-table td { min-width: 0; padding: 0.65rem 0.3rem; }
   .event-table .btn { font-size: 0.78rem; padding-inline: 0.4rem; }

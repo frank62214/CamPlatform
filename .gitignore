@@ -11,3 +11,4 @@ cam2/*
 !.env.example
 *.secret.json
 .agent-collaboration/
+models/

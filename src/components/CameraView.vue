@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type Hls from 'hls.js'
-import { ApiError, apiRequest, handleUnauthorized, sameOriginUrl } from '../api'
-import { usePersonDetection, type PersonObservation } from '../detection/usePersonDetection'
+import { ApiError, apiRequest, handleUnauthorized, sameOriginUrl, type DetectionCameraStatus } from '../api'
 
 const props = withDefaults(defineProps<{
   title: string
@@ -11,10 +10,15 @@ const props = withDefaults(defineProps<{
   clip?: { startSeconds: number; endSeconds: number }
   compact?: boolean
   playOnLoad?: boolean
+  detectionStatus?: DetectionCameraStatus
+  detectionUnavailable?: string
+  detectionSaving?: boolean
+  detectionControlsDisabled?: boolean
+  detectionControlError?: string
 }>(), { kind: 'live' })
 
 const emit = defineEmits<{
-  'person-event': [observation: PersonObservation]
+  'detection-change': [enabled: boolean]
   'clip-ended': []
 }>()
 
@@ -29,23 +33,38 @@ let checkingAuthentication = false
 const playBlocked = ref(false)
 let clipFinished = false
 let clipTimer: ReturnType<typeof setInterval> | undefined
+const now = ref(Date.now())
+let freshnessTimer: ReturnType<typeof setInterval> | undefined
+const stale = computed(() => {
+  const last = Date.parse(props.detectionStatus?.lastFrameAt ?? '')
+  return !Number.isFinite(last) || now.value - last > 30_000 || last - now.value > 30_000
+})
+const watching = computed(() => !props.detectionUnavailable && props.detectionStatus?.enabled &&
+  props.detectionStatus.state === 'watching' && !stale.value)
+const present = computed(() => watching.value && props.detectionStatus?.present)
+const detectionText = computed(() => {
+  if (props.detectionUnavailable) return '偵測服務連線異常 · 狀態尚未確認'
+  const status = props.detectionStatus
+  if (!status) return '正在取得伺服器偵測狀態…'
+  if (!status.enabled || status.state === 'disabled') return '伺服器偵測已關閉'
+  if (status.state === 'error') return '偵測服務異常 · 伺服器將自動重試'
+  if (status.state === 'starting') return '伺服器正在啟動偵測…'
+  if (status.state === 'waiting') return '等待可分析的即時影像'
+  if (stale.value) return '影像更新延遲 · 尚未確認目前畫面'
+  return '伺服器持續監控中'
+})
 
-function frameTime(): { time: number; timing: PersonObservation['timing'] } {
-  const video = cam.value
-  const playingDate = hls?.playingDate
-  if (playingDate && Number.isFinite(playingDate.getTime())) return { time: playingDate.getTime(), timing: 'stream' }
-  const nativeStart = (video as (HTMLVideoElement & { getStartDate?: () => Date }) | null)?.getStartDate?.()
-  if (nativeStart && Number.isFinite(nativeStart.getTime()) && video) {
-    return { time: nativeStart.getTime() + video.currentTime * 1000, timing: 'stream' }
-  }
-  const delay = video?.seekable.length
-    ? Math.max(0, video.seekable.end(video.seekable.length - 1) - video.currentTime) * 1000 : 0
-  return { time: Date.now() - delay, timing: 'estimated' }
+function detectionTime(value: string) {
+  return new Date(value).toLocaleString('zh-TW', { hour12: false, timeZone: 'Asia/Taipei' })
 }
 
-const detection = usePersonDetection(cam, () => props.videoUrl, () => props.kind === 'live', frameTime,
-  (observation) => emit('person-event', observation))
-const { enabled, status, statusText, present, count, latest } = detection
+function changeDetection(event: Event) {
+  const input = event.target as HTMLInputElement
+  const requested = input.checked
+  // Keep the visible switch at the acknowledged server value until saving succeeds.
+  input.checked = props.detectionStatus?.enabled ?? false
+  emit('detection-change', requested)
+}
 
 function finishClip() {
   if (!props.clip) return
@@ -95,7 +114,6 @@ function handleMetadata() {
 }
 
 function releasePlayer() {
-  detection.suspend()
   clearInterval(clipTimer)
   clipFinished = false
   playBlocked.value = false
@@ -211,9 +229,13 @@ function handleMediaError() {
 defineExpose({ play: () => cam.value?.play().catch(() => {}) })
 
 watch(() => props.videoUrl, () => void startPlayer())
-onMounted(() => void startPlayer())
+onMounted(() => {
+  void startPlayer()
+  if (props.kind === 'live') freshnessTimer = setInterval(() => { now.value = Date.now() }, 5000)
+})
 onBeforeUnmount(() => {
   disposed = true
+  clearInterval(freshnessTimer)
   releasePlayer()
 })
 </script>
@@ -223,8 +245,10 @@ onBeforeUnmount(() => {
     <div v-if="!compact || kind === 'live'" class="camera-heading">
       <h3>{{ title }}</h3>
       <label v-if="kind === 'live'" class="detection-toggle">
-        <input v-model="enabled" type="checkbox" role="switch" :aria-label="`${title} 人物偵測`" />
-        人物偵測
+        <input :checked="detectionStatus?.enabled ?? false" type="checkbox" role="switch"
+          :disabled="!detectionStatus || detectionControlsDisabled || detectionSaving"
+          :aria-label="`${title} 伺服器持續偵測`" @change="changeDetection" />
+        {{ detectionSaving ? '正在儲存…' : '伺服器持續偵測' }}
       </label>
     </div>
     <video ref="cam" controls :autoplay="kind === 'live' || playOnLoad" :muted="kind === 'live'" playsinline
@@ -234,13 +258,16 @@ onBeforeUnmount(() => {
     <button v-if="playBlocked" class="btn btn-primary mt-2" type="button" @click="playClip">播放事件片段</button>
     <div v-if="kind === 'live'" class="detection-panel" :class="{ 'detection-panel--present': present }">
       <p class="detection-state" role="status">
-        <span class="detection-dot" :class="{ active: status === 'watching', detected: present }" aria-hidden="true" />
-        <strong v-if="present">有人出現 · {{ count }} 人</strong>
-        <span v-else>{{ statusText }}</span>
-        <button v-if="status === 'error'" type="button" class="btn btn-sm btn-outline-secondary" @click="detection.retry">重試偵測</button>
+        <span class="detection-dot" :class="{ active: watching, detected: present }" aria-hidden="true" />
+        <strong v-if="present">有人出現<span v-if="detectionStatus && detectionStatus.count > 0"> · {{ detectionStatus.count }} 人</span></strong>
+        <span v-else>{{ detectionText }}</span>
       </p>
-      <p v-if="latest" class="detection-last">最近事件 {{ new Date(latest.occurredAt).toLocaleTimeString('zh-TW', { hour12: false }) }} · 已加入下方事件清單</p>
-      <p v-else class="detection-last">啟用後，人物出現時會記錄事件，方便回看片段。</p>
+      <p v-if="detectionControlError" class="detection-control-error" role="alert">{{ detectionControlError }}</p>
+      <p class="detection-last">最近分析：{{ detectionStatus?.lastFrameAt ? detectionTime(detectionStatus.lastFrameAt) : '尚無分析影像' }}
+        <span v-if="detectionStatus?.enabled && detectionStatus.lastFrameAt && stale" class="detection-stale"> · 超過 30 秒未更新</span>
+      </p>
+      <p v-if="detectionStatus?.lastEventAt" class="detection-last">最近事件：{{ detectionTime(detectionStatus.lastEventAt) }}（台北時間）</p>
+      <p class="detection-last">啟用後關閉網頁仍持續監控，事件由伺服器保存。</p>
     </div>
     <p v-if="loading && !error" class="camera-status" role="status">正在載入影像…</p>
     <div v-if="error" class="camera-error" role="alert">
@@ -256,6 +283,7 @@ onBeforeUnmount(() => {
 .camera-heading h3 { margin: 0; }
 .detection-toggle { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; cursor: pointer; }
 .detection-toggle input { width: 1.1rem; height: 1.1rem; accent-color: #087f82; }
+.detection-toggle:has(input:disabled) { cursor: default; color: #65748a; }
 .detection-panel { padding: 0.85rem; margin-top: 0.65rem; border: 1px solid #d8e2eb; border-radius: 10px; background: #fff; }
 .detection-panel--present { border-color: #ce8620; background: #fff7e7; }
 .detection-state { display: flex; align-items: center; flex-wrap: wrap; gap: 0.45rem; margin: 0; font-size: 0.88rem; }
@@ -263,6 +291,8 @@ onBeforeUnmount(() => {
 .detection-dot.active { background: #087f82; }
 .detection-dot.detected { background: #b76c0b; }
 .detection-last { margin: 0.4rem 0 0; color: #65748a; font-size: 0.8rem; }
+.detection-control-error { margin: 0.5rem 0 0; color: #9e3544; font-size: 0.85rem; }
+.detection-stale { color: #966211; }
 .camera-view video { display: block; width: 100%; aspect-ratio: 16 / 9; border-radius: 10px; background: #091727; }
 .camera-status, .camera-error { padding: 0.75rem 0; color: #65748a; font-size: 0.9rem; }
 .camera-error p { margin-bottom: 0.6rem; color: #9e3544; }

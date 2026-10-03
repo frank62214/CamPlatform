@@ -2,6 +2,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createApp } from './backend/app.js';
 import { loadConfig } from './backend/config.js';
+import { createDetectionService } from './backend/detection-service.js';
 
 export { createApp };
 
@@ -10,12 +11,18 @@ export { createApp };
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   try {
     const config = loadConfig();
-    const server = createApp(config).listen(config.port, '0.0.0.0', () => {
+    const detection = createDetectionService(config);
+    await detection.start();
+    const server = createApp(config, { detection }).listen(config.port, '0.0.0.0', () => {
       console.log(`CamPlatform API listening on port ${config.port}`);
     });
+    let stopping = false;
     for (const signal of ['SIGTERM', 'SIGINT']) {
       process.once(signal, () => {
-        server.close(() => process.exit(0));
+        if (stopping) return;
+        stopping = true;
+        const closed = new Promise((resolve) => server.close(resolve));
+        void Promise.all([closed, detection.stop()]).then(() => process.exit(0), () => process.exit(1));
         setTimeout(() => process.exit(0), 10_000).unref();
       });
     }

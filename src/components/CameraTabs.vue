@@ -3,29 +3,75 @@ import { onBeforeUnmount, onMounted, ref } from 'vue'
 import CameraView from './CameraView.vue'
 import CameraHistory from './CameraHistory.vue'
 import PersonEventList from './PersonEventList.vue'
-import { apiRequest, errorMessage, isAborted, type Camera } from '../api'
-import { EVENT_LIMIT, readPersonEvents, savePersonEvents, type PersonEvent } from '../detection/person-events'
-import type { PersonObservation } from '../detection/usePersonDetection'
+import { apiRequest, errorMessage, isAborted, type Camera, type DetectionStatus, type DetectionCameraStatus } from '../api'
 
-const props = defineProps<{ account: string }>()
+defineProps<{ account: string }>()
 const activeTab = ref<'realtime' | 'history' | 'events'>('realtime')
 const cameras = ref<Camera[]>([])
 const camerasLoading = ref(true)
 const camerasError = ref('')
-const personEvents = ref<PersonEvent[]>([])
-const eventStorageError = ref('')
 const controller = new AbortController()
+const detection = ref<DetectionStatus | null>(null)
+const detectionError = ref('')
+const savingCamera = ref<string | null>(null)
+const controlErrors = ref<Record<string, string>>({})
+let statusRequest: AbortController | undefined
+let controlRequest: AbortController | undefined
+let statusTimer: ReturnType<typeof setTimeout> | undefined
+let statusGeneration = 0
+let disposed = false
 
-try { personEvents.value = readPersonEvents(props.account) }
-catch { eventStorageError.value = '無法讀取此瀏覽器的事件紀錄，新事件仍會顯示在本頁。' }
+async function loadDetection() {
+  if (disposed || savingCamera.value) return
+  clearTimeout(statusTimer)
+  statusRequest?.abort()
+  const current = new AbortController()
+  statusRequest = current
+  const generation = ++statusGeneration
+  const timeout = setTimeout(() => current.abort(), 10_000)
+  try {
+    const result = await apiRequest<DetectionStatus>('/api/detection', { signal: current.signal })
+    if (disposed || generation !== statusGeneration || current.signal.aborted) return
+    detection.value = result
+    detectionError.value = ''
+  } catch (cause) {
+    if (disposed || generation !== statusGeneration) return
+    detectionError.value = current.signal.aborted ? '偵測狀態讀取逾時，無法確認目前是否正常監控。'
+      : errorMessage(cause, '無法連線至偵測服務，目前狀態尚未確認。')
+  } finally {
+    clearTimeout(timeout)
+    if (!disposed && generation === statusGeneration) statusTimer = setTimeout(() => void loadDetection(), 5000)
+  }
+}
 
-function recordPersonEvent(camera: Camera, observation: PersonObservation) {
-  personEvents.value = [{
-    ...observation, id: crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    cameraId: camera.id, cameraName: camera.name,
-  }, ...personEvents.value].slice(0, EVENT_LIMIT)
-  try { savePersonEvents(props.account, personEvents.value); eventStorageError.value = '' }
-  catch { eventStorageError.value = '瀏覽器無法保存事件紀錄；本次事件在關閉或重整頁面後可能遺失。' }
+async function setDetection(cameraId: string, enabled: boolean) {
+  if (disposed || savingCamera.value || !detection.value?.enabled || detectionError.value) return
+  clearTimeout(statusTimer)
+  ++statusGeneration
+  statusRequest?.abort()
+  const current = new AbortController()
+  controlRequest = current
+  savingCamera.value = cameraId
+  controlErrors.value[cameraId] = ''
+  const timeout = setTimeout(() => current.abort(), 10_000)
+  try {
+    const status = await apiRequest<DetectionCameraStatus>(`/api/cameras/${encodeURIComponent(cameraId)}/detection`, {
+      method: 'POST', body: JSON.stringify({ enabled }), signal: current.signal,
+    })
+    if (disposed || current.signal.aborted || controlRequest !== current) return
+    if (detection.value) detection.value.cameras = detection.value.cameras.map(camera => camera.cameraId === cameraId ? status : camera)
+  } catch (cause) {
+    if (disposed || controlRequest !== current) return
+    controlErrors.value[cameraId] = current.signal.aborted ? '設定儲存逾時；開關將以重新取得的伺服器設定為準，請確認後再試。'
+      : errorMessage(cause, '設定儲存未獲確認；開關以伺服器回傳值為準，請確認後再試。')
+  } finally {
+    clearTimeout(timeout)
+    if (!disposed && controlRequest === current) {
+      savingCamera.value = null
+      controlRequest = undefined
+      void loadDetection()
+    }
+  }
 }
 
 async function loadCameras() {
@@ -41,8 +87,15 @@ async function loadCameras() {
   }
 }
 
-onMounted(() => void loadCameras())
-onBeforeUnmount(() => controller.abort())
+onMounted(() => { void loadCameras(); void loadDetection() })
+onBeforeUnmount(() => {
+  disposed = true
+  ++statusGeneration
+  clearTimeout(statusTimer)
+  controller.abort()
+  statusRequest?.abort()
+  controlRequest?.abort()
+})
 </script>
 
 <template>
@@ -75,12 +128,25 @@ onBeforeUnmount(() => controller.abort())
         </div>
       </section>
       <div v-else class="camera-content">
+        <div class="monitoring-note">
+          <strong>伺服器持續偵測 · 關閉網頁仍持續監控</strong>
+          <p>啟用的攝影機由伺服器分析與記錄，切換分頁或登出不會停止偵測。設定會同步至所有裝置。</p>
+          <p v-if="detection && !detection.enabled" class="text-warning-emphasis" role="status">伺服器偵測服務目前未啟用，請聯絡管理者。</p>
+          <p v-if="detectionError" class="text-danger" role="alert">{{ detectionError }}
+            <button type="button" class="btn btn-sm btn-outline-secondary ms-2" :disabled="!!savingCamera" @click="loadDetection">重新確認</button>
+          </p>
+        </div>
         <div v-if="activeTab === 'realtime'" class="row g-4 mt-1">
           <div v-for="camera in cameras" :key="camera.id" class="col-lg-6">
-            <CameraView :title="camera.name" :video-url="camera.liveUrl" @person-event="recordPersonEvent(camera, $event)" />
+            <CameraView :title="camera.name" :video-url="camera.liveUrl"
+              :detection-status="detection?.cameras.find(status => status.cameraId === camera.id)"
+              :detection-unavailable="detectionError" :detection-saving="savingCamera === camera.id"
+              :detection-controls-disabled="!detection?.enabled || !!savingCamera || !!detectionError"
+              :detection-control-error="controlErrors[camera.id]"
+              @detection-change="setDetection(camera.id, $event)" />
           </div>
         </div>
-        <PersonEventList :events="personEvents" :cameras="cameras" :storage-error="eventStorageError" />
+        <PersonEventList :cameras="cameras" />
       </div>
     </template>
   </div>
@@ -89,6 +155,8 @@ onBeforeUnmount(() => controller.abort())
 <style scoped>
 .camera-tabs { padding-top: 1.5rem; }
 .camera-content { min-width: 0; }
+.monitoring-note { margin-top: 1.25rem; padding: 0.9rem 1rem; border-radius: 0.6rem; background: #eef7f7; color: #245e63; font-size: 0.88rem; line-height: 1.65; }
+.monitoring-note p { margin: 0.35rem 0 0; }
 .history-section { padding-top: 1.75rem; }
 .history-grid { display: grid; gap: 1.5rem; }
 .history-grid > div { min-width: 0; }
